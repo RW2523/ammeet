@@ -65,6 +65,8 @@ class Meeting(Base):
     # Proxy specific
     proxy_consent_given: Mapped[bool] = mapped_column(Boolean, default=False)
     proxy_intro_logged: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Live meeting join URL (Zoom / Meet / Teams link)
+    meeting_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Calendar integration ref
     calendar_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
@@ -78,6 +80,7 @@ class Meeting(Base):
     decisions: Mapped[list[Decision]] = relationship(back_populates="meeting", cascade="all, delete-orphan")
     risks: Mapped[list[Risk]] = relationship(back_populates="meeting", cascade="all, delete-orphan")
     reports: Mapped[list[Report]] = relationship(back_populates="meeting", cascade="all, delete-orphan")
+    bots: Mapped[list["MeetingBot"]] = relationship("MeetingBot", back_populates="meeting", cascade="all, delete-orphan")  # type: ignore[name-defined]
 
 
 class ContextSource(Base):

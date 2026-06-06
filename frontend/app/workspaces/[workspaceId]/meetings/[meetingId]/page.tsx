@@ -620,6 +620,12 @@ function ProxyRoom({
             <Bot className="h-5 w-5 mr-2" />
             Start Proxy Session (Simulated)
           </Button>
+          <Link
+            href={`/workspaces/${meeting.workspace_id}/meetings/${meeting.id}/live`}
+            className="inline-flex items-center gap-2 ml-4 bg-green-700 hover:bg-green-600 text-white rounded-lg px-6 py-2.5 text-sm font-semibold transition"
+          >
+            🚀 Go Live (Real Meeting Bot)
+          </Link>
           {approvedCount === 0 && (
             <p className="text-orange-400 text-sm mt-3">
               No questions are approved for proxy. Go to Questions tab and enable proxy for at least one question.

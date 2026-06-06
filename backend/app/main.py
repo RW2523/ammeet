@@ -5,6 +5,7 @@ from app.core.database import engine
 from app.core.logging import get_logger, setup_logging
 from app.core.redis import close_redis, get_redis
 from app.routers import auth, workspaces, people, meetings, questions, reports, knowledge, integrations, admin
+from app.routers import live_session
 
 from contextlib import asynccontextmanager
 
@@ -54,6 +55,7 @@ app.include_router(reports.router, prefix="/api/workspaces", tags=["reports"])
 app.include_router(knowledge.router, prefix="/api/workspaces", tags=["knowledge"])
 app.include_router(integrations.router, prefix="/api/workspaces", tags=["integrations"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(live_session.router, prefix="/api", tags=["live-session"])
 
 
 @app.get("/api/health")

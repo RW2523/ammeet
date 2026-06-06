@@ -17,6 +17,7 @@ from app.models.meeting import (
     Report,
 )
 from app.models.knowledge import KnowledgeChunk, Integration, RetentionPolicy
+from app.models.meeting_bot import MeetingBot, BotStatus as BotStatusEnum
 
 __all__ = [
     "User", "Workspace", "WorkspaceMember", "WorkspaceRole", "AuditLog",
@@ -25,4 +26,5 @@ __all__ = [
     "Question", "QuestionPriority", "QuestionCategory", "QuestionStatus",
     "Answer", "ActionItem", "Decision", "Risk", "Report",
     "KnowledgeChunk", "Integration", "RetentionPolicy",
+    "MeetingBot", "BotStatusEnum",
 ]

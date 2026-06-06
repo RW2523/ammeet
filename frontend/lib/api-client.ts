@@ -98,3 +98,41 @@ export const integrationApi = {
   disconnect: (workspaceId: string, provider: string) =>
     api.delete(`/workspaces/${workspaceId}/integrations/${provider}/disconnect`).then((r) => r.data),
 };
+
+// Live session / meeting bot
+export const liveSessionApi = {
+  joinMeeting: (
+    workspaceId: string,
+    meetingId: string,
+    data: { meeting_url: string; simulate?: boolean }
+  ) =>
+    api.post<{ status: string; questions_queued: number; message: string }>(
+      `/workspaces/${workspaceId}/meetings/${meetingId}/bot/join`,
+      data
+    ).then((r) => r.data),
+
+  getBotStatus: (workspaceId: string, meetingId: string) =>
+    api.get<import("./types").MeetingBot>(
+      `/workspaces/${workspaceId}/meetings/${meetingId}/bot/status`
+    ).then((r) => r.data),
+
+  leaveMeeting: (workspaceId: string, meetingId: string) =>
+    api.post<{ status: string }>(
+      `/workspaces/${workspaceId}/meetings/${meetingId}/bot/leave`
+    ).then((r) => r.data),
+
+  transcribeAudio: (workspaceId: string, meetingId: string, audioFile: File) => {
+    const form = new FormData();
+    form.append("audio_file", audioFile);
+    return api
+      .post<{ transcript: string; chars: number; filename: string }>(
+        `/workspaces/${workspaceId}/meetings/${meetingId}/transcribe-audio`,
+        form,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      )
+      .then((r) => r.data);
+  },
+
+  synthesizeSpeech: (workspaceId: string, text: string): string =>
+    `${process.env.NEXT_PUBLIC_API_URL}/api/workspaces/${workspaceId}/tts`,
+};

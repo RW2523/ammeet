@@ -127,7 +127,7 @@ export interface PrepBrief {
 }
 
 export interface ProxyEvent {
-  type: "disclosure" | "asking" | "answered" | "escalation" | "clarifying" | "info" | "session_complete" | "report_ready" | "error";
+  type: "disclosure" | "asking" | "answered" | "escalation" | "clarifying" | "info" | "session_complete" | "report_ready" | "error" | "bot_status" | "transcript" | "tts_audio";
   question_id?: string;
   text?: string;
   answer?: string;
@@ -135,4 +135,34 @@ export interface ProxyEvent {
   reason?: string;
   answer_preview?: string;
   message?: string;
+  // Bot-specific fields
+  status?: string;
+  bot_id?: string;
+  // Transcript fields
+  speaker?: string;
+  is_final?: boolean;
+  source?: string;
+  // TTS fields
+  audio_b64?: string;
+  voice?: string;
+}
+
+export interface MeetingBot {
+  bot_db_id: string;
+  external_bot_id: string | null;
+  provider: string;
+  status: string;
+  meeting_url: string | null;
+  joined_at: string | null;
+  left_at: string | null;
+  session_active: boolean;
+  live_status?: string;
+}
+
+export interface TranscriptSegment {
+  speaker: string;
+  text: string;
+  is_final: boolean;
+  source?: string;
+  timestamp?: number;
 }

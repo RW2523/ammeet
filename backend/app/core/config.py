@@ -42,7 +42,21 @@ class Settings(BaseSettings):
     jira_provider: Literal["mock", "real"] = "mock"
     calendar_provider: Literal["mock", "real"] = "mock"
     slack_provider: Literal["mock", "real"] = "mock"
-    stt_provider: Literal["mock", "real"] = "mock"
+
+    # STT — "mock" | "whisper" | "assemblyai"
+    stt_provider: Literal["mock", "whisper", "assemblyai"] = "mock"
+    assemblyai_api_key: str = ""
+
+    # TTS — "none" | "openai"
+    tts_provider: Literal["none", "openai"] = "openai"
+    tts_voice: str = "nova"  # nova | alloy | echo | fable | onyx | shimmer
+
+    # Meeting bot — "mock" | "recall"
+    bot_provider: Literal["mock", "recall"] = "mock"
+    recall_api_key: str = ""
+    recall_api_base: str = "https://us-east-1.recall.ai/api/v1"
+    # Webhook URL Recall.ai will POST transcripts to (must be publicly reachable)
+    webhook_base_url: str = "http://localhost:8000"
 
     @property
     def cors_origins_list(self) -> list[str]:
