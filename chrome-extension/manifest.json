@@ -1,0 +1,87 @@
+{
+  "manifest_version": 3,
+  "name": "AmMeeting",
+  "version": "1.0.0",
+  "description": "AI meeting proxy — asks your questions, collects answers, and represents you live in Zoom/Meet/Teams.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "notifications",
+    "sidePanel",
+    "tabCapture",
+    "alarms"
+  ],
+
+  "host_permissions": [
+    "https://zoom.us/*",
+    "https://*.zoom.us/*",
+    "https://meet.google.com/*",
+    "https://teams.microsoft.com/*",
+    "https://*.teams.microsoft.com/*",
+    "http://localhost:8000/*",
+    "https://ammeet-api.yourdomain.com/*"
+  ],
+
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://zoom.us/wc/*",
+        "https://app.zoom.us/wc/*",
+        "https://zoom.us/j/*",
+        "https://meet.google.com/*",
+        "https://teams.microsoft.com/_#/callings/*",
+        "https://teams.microsoft.com/v2/*"
+      ],
+      "js": ["content-meeting.js"],
+      "css": [],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://zoom.us/wc/*",
+        "https://app.zoom.us/wc/*",
+        "https://meet.google.com/*",
+        "https://teams.microsoft.com/*"
+      ],
+      "js": ["content-overlay.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AmMeeting",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*", "chunks/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
