@@ -28,6 +28,7 @@
     "https://teams.microsoft.com/*",
     "https://*.teams.microsoft.com/*",
     "http://localhost:8000/*",
+    "http://localhost:8010/*",
     "https://ammeet-api.yourdomain.com/*"
   ],
 
@@ -68,8 +69,7 @@
   },
 
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "AmMeeting",
+    "default_title": "AmMeeting — open side panel",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

@@ -2,6 +2,41 @@
 
 AI meeting proxy assistant — represents you in Zoom, Google Meet, and Microsoft Teams using your browser's native STT/TTS plus the AmMeeting backend.
 
+## 📝 Notetaker mode (bot-free) — the way real notetakers work
+
+The big idea, borrowed from Otter / Fireflies / Fathom: **don't send a bot that has to
+sign in and be admitted** (Google now blocks third-party notetaker bots by default).
+Instead, capture the meeting from **your own browser tab** — you're already signed in and
+admitted, so there's nothing to authenticate.
+
+**How it works**
+1. You join the Google Meet / Zoom / Teams call as normal and turn on **live captions (CC)**.
+2. The content script (`caption-scraper.ts`) reads the caption lines from the page DOM.
+3. The service worker batches them and `POST`s to the backend
+   `…/notetaker/transcript`, which accumulates the transcript on the meeting.
+4. The side panel's **📝 Notes** tab shows the live transcript and a **Generate notes**
+   button → the backend LLM (your configured provider) returns summary, key points,
+   action items, decisions, and risks.
+5. **Stop & finalize** folds the transcript into the workspace knowledge base.
+
+No bot joins, no Google sign-in, no host admission, no Recall.ai, no cost.
+
+**Try it**
+```bash
+cd chrome-extension && npm install && npm run build
+# Chrome → chrome://extensions → Developer mode → Load unpacked → select chrome-extension/dist
+# In the side panel: set backend URL (http://localhost:8010), log in.
+# Join a Google Meet, turn on captions (CC), pick a workspace+meeting in 🚀 Session,
+# then open 📝 Notes → Start notetaker.
+```
+
+> **Note on verification:** the backend notetaker (transcript + AI notes) is fully built
+> and live-tested (`/notetaker/*` endpoints, 4 passing tests, real notes generated via the
+> configured LLM). The extension **builds and type-checks clean**. The one piece that needs
+> a real meeting to validate is the **caption-DOM selectors** in `caption-scraper.ts` —
+> Google/Zoom/Teams obfuscate and change these, so they may need tuning against a live
+> meeting (the architecture is identical to how Fathom/tl;dv scrape captions).
+
 ## Architecture
 
 ```

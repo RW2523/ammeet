@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import base64
 from typing import Any
 
 import httpx
@@ -16,6 +16,21 @@ from app.services.meeting_bot.base import (
 
 _logger = get_logger(__name__)
 _settings = get_settings()
+
+# A ~0.2s silent MP3. Recall requires `automatic_audio_output` to be configured at
+# bot-creation time to enable the on-demand /output_audio/ endpoint; we seed it with
+# silence so the bot doesn't auto-play anything but can speak on command later.
+_SILENT_MP3_B64 = (
+    "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYyLjEyLjEwMQAAAAAAAAAAAAAA//OEwAAAAAAAAAAAAElu"
+    "Zm8AAAAPAAAACwAAAcgAeXl5eXl5eXl5hoaGhoaGhoaGlJSUlJSUlJSUoaGhoaGhoaGhr6+vr6+vr6+"
+    "vvLy8vLy8vLy8ysrKysrKysrK19fX19fX19fX5eXl5eXl5eXl8vLy8vLy8vLy////////////AAAAAExh"
+    "dmM2Mi4yOAAAAAAAAAAAAAAAACQDwAAAAAAAAAHIPuBHcQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//MU"
+    "xAAAAANIAAAAAExBTUUzLjEwMFVV//MUxAsAAANIAAAAAFVVVVVVVVVVVVVV//MUxBYAAANIAAAAAFVV"
+    "VVVVVVVVVVVV//MUxCEAAANIAAAAAFVVVVVVVVVVVVVV//MUxCwAAANIAAAAAFVVVVVVVVVVVVVV//MU"
+    "xDcAAANIAAAAAFVVVVVVVVVVVVVV//MUxEIAAANIAAAAAFVVVVVVVVVVVVVV//MUxE0AAANIAAAAAFVV"
+    "VVVVVVVVVVVV//MUxFgAAANIAAAAAFVVVVVVVVVVVVVV//MUxGMAAANIAAAAAFVVVVVVVVVVVVVV//MU"
+    "xG4AAANIAAAAAFVVVVVVVVVVVVVV"
+)
 
 # Recall.ai status → our BotStatus mapping
 _STATUS_MAP: dict[str, BotStatus] = {
@@ -89,6 +104,13 @@ class RecallAIBotProvider(MeetingBotProvider):
                     ),
                 }
             },
+            # Required to enable the on-demand /output_audio/ endpoint. Seeded with
+            # silence so nothing auto-plays; real speech is sent later via output_audio().
+            "automatic_audio_output": {
+                "in_call_recording": {
+                    "data": {"kind": "mp3", "b64_data": _SILENT_MP3_B64}
+                }
+            },
         }
 
         if webhook_url:
@@ -100,9 +122,11 @@ class RecallAIBotProvider(MeetingBotProvider):
         data = resp.json()
         _logger.info("Recall.ai bot created: %s", data.get("id"))
 
+        # status_changes may be present-but-empty on a freshly created bot
+        status_changes = data.get("status_changes") or [{}]
         return BotInfo(
             bot_id=data["id"],
-            status=_STATUS_MAP.get(data.get("status_changes", [{}])[-1].get("code", ""), BotStatus.CREATED),
+            status=_STATUS_MAP.get(status_changes[-1].get("code", ""), BotStatus.CREATED),
             meeting_url=meeting_url,
             provider="recall",
             raw=data,
@@ -136,25 +160,29 @@ class RecallAIBotProvider(MeetingBotProvider):
             _logger.error("Failed to remove bot %s: %s", bot_id, exc.response.text)
             return False
 
-    async def speak_message(self, bot_id: str, text: str) -> bool:
+    async def output_audio(self, bot_id: str, mp3_bytes: bytes) -> bool:
         """
-        Make the Recall.ai bot speak a message in the meeting.
-        Recall.ai handles TTS internally.
+        Play synthesized speech (MP3 bytes) into the live meeting via Recall.ai's
+        Output Audio API, so other participants actually hear it.
+
+        POST /bot/{id}/output_audio/  body: {"kind": "mp3", "b64_data": <base64 mp3>}
+        Requires the bot to have been created with `automatic_audio_output`.
         """
-        if not text or not text.strip():
+        if not mp3_bytes:
             return True
 
-        _logger.info("Bot %s speaking: %s...", bot_id, text[:80])
+        b64 = base64.b64encode(mp3_bytes).decode("utf-8")
+        _logger.info("Bot %s outputting %d bytes of audio into meeting", bot_id, len(mp3_bytes))
         try:
             resp = await self._client.post(
-                f"bot/{bot_id}/speak_message/",
-                json={"message": text.strip()},
+                f"bot/{bot_id}/output_audio/",
+                json={"kind": "mp3", "b64_data": b64},
             )
             resp.raise_for_status()
             return True
         except httpx.HTTPStatusError as exc:
             _logger.error(
-                "Bot speak failed for %s (%d): %s",
+                "Bot output_audio failed for %s (%d): %s",
                 bot_id,
                 exc.response.status_code,
                 exc.response.text,

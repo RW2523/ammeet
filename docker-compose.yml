@@ -63,6 +63,21 @@ services:
     depends_on:
       - backend
 
+  # Self-hosted meeting bot (headless Chromium). Heavy + optional, so it's behind a
+  # profile: enable with `docker compose --profile bots up bot-worker`.
+  # Then set BOT_PROVIDER=browser and BROWSER_BOT_WORKER_URL=http://bot-worker:4500
+  # in the backend env so the proxy/assistant agents drive this bot.
+  bot-worker:
+    build:
+      context: ./bot-worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles: ["bots"]
+    ports:
+      - "4500:4500"
+    # WebRTC media needs UDP; on Linux hosts you may prefer network_mode: host.
+    shm_size: "1gb"
+
 volumes:
   pgdata:
   redisdata:

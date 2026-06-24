@@ -11,10 +11,9 @@ Live session router:
 """
 
 import asyncio
-import base64
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import (
@@ -25,30 +24,31 @@ from fastapi import (
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
-    status,
 )
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_workspace_role
 from app.core.redis import get_redis
-from app.models.meeting import Meeting, MeetingStatus, Question, QuestionStatus
+from app.models.meeting import Meeting, MeetingMode, MeetingStatus, Question, QuestionStatus
 from app.models.meeting_bot import BotStatus, MeetingBot
-from app.models.user import User, WorkspaceRole
+from app.models.user import AuditLog, User, WorkspaceRole
 from app.services.live_proxy import (
-    LiveProxySession,
     get_active_session,
-    register_session,
+    launch_session,
     unregister_session,
 )
+from app.services.meeting_assistant import get_active_assistant, launch_assistant
 from app.services.meeting_bot import get_bot_provider
 from app.services.meeting_bot.base import TranscriptSegment
 from app.services.stt import get_stt
 
 _logger = logging.getLogger(__name__)
+_settings = get_settings()
 
 router = APIRouter()
 
@@ -130,7 +130,6 @@ async def meeting_websocket(meeting_id: str, websocket: WebSocket) -> None:
             if msg.get("type") == "audio_chunk":
                 audio_b64 = msg.get("data", "")
                 if audio_b64:
-                    audio_bytes = base64.b64decode(audio_b64)
                     session = get_active_session(meeting_id)
                     if session:
                         seg = TranscriptSegment(
@@ -181,10 +180,13 @@ async def recall_webhook(
                 is_final=is_final,
             )
 
-            # Push to live session if active
+            # Push to whichever agent is live for this meeting (proxy or assistant)
             session = get_active_session(meeting_id)
             if session:
                 await session.ingest_transcript_segment(segment)
+            assistant = get_active_assistant(meeting_id)
+            if assistant:
+                await assistant.ingest_transcript_segment(segment)
 
             # Broadcast raw transcript to WebSocket clients
             await _manager.broadcast(meeting_id, {
@@ -286,31 +288,15 @@ async def join_meeting(
     )
     questions = list(q_result.scalars().all())
 
-    # Update meeting URL if provided
-    if body.meeting_url:
-        meeting.meeting_url = body.meeting_url
-    meeting.status = MeetingStatus.IN_PROGRESS
-    await db.flush()
-
-    # Create live proxy session
-    session = LiveProxySession(
-        db=db,
-        meeting=meeting,
+    # Launch the live proxy session in the background (it owns its own DB session and
+    # sets meeting_url / IN_PROGRESS status itself). Events stream over the WebSocket.
+    await launch_session(
+        meeting_id=meeting_id,
+        workspace_id=workspace_id,
         user_name=current_user.full_name or current_user.email,
-        questions=questions,
-        meeting_url=None if body.simulate else body.meeting_url,
+        meeting_url=body.meeting_url,
+        simulate=body.simulate,
     )
-    register_session(meeting_id, session)
-
-    # Run session in background; broadcast events via WebSocket
-    async def _run_and_broadcast() -> None:
-        try:
-            async for event in session.run():
-                await _manager.broadcast(meeting_id, event)
-        finally:
-            unregister_session(meeting_id)
-
-    asyncio.create_task(_run_and_broadcast())
 
     return {
         "status": "started",
@@ -348,9 +334,7 @@ async def get_bot_status(
         "meeting_url": db_bot.meeting_url,
         "joined_at": db_bot.joined_at.isoformat() if db_bot.joined_at else None,
         "left_at": db_bot.left_at.isoformat() if db_bot.left_at else None,
-        "session_active": meeting_id in {
-            k for k, v in {}.items()  # placeholder — registry is internal
-        },
+        "session_active": get_active_session(meeting_id) is not None,
     }
 
     # Try live status from provider
@@ -400,6 +384,191 @@ async def leave_meeting(
     })
 
     return {"status": "left", "meeting_id": meeting_id}
+
+
+# ── Meeting Assistant agent ────────────────────────────────────────────────
+
+class AssistantStartRequest(BaseModel):
+    mode: str = "assistant"        # "assistant" (listen + reply) | "recorder" (silent)
+    meeting_url: str = ""
+    simulate: bool = False         # real bot by default — no simulation
+    assistant_name: str = "AmMeeting"
+
+
+def detect_platform(url: str) -> str:
+    u = (url or "").lower()
+    if "meet.google.com" in u:
+        return "google_meet"
+    if "zoom.us" in u or "zoom.com" in u:
+        return "zoom"
+    if "teams.microsoft" in u or "teams.live.com" in u:
+        return "teams"
+    if "jit.si" in u or "jitsi" in u or "8x8.vc" in u or "ffmuc" in u:
+        return "jitsi"
+    return "other"
+
+
+@router.post("/workspaces/{workspace_id}/meetings/{meeting_id}/assistant/start")
+async def start_assistant(
+    workspace_id: str,
+    meeting_id: str,
+    body: AssistantStartRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Send the meeting-assistant agent to attend, listen, and (in assistant mode) reply.
+    Connect to the WebSocket /api/ws/meetings/{meeting_id} for live events."""
+    await require_workspace_role(workspace_id, current_user, db, WorkspaceRole.MEMBER)
+
+    result = await db.execute(
+        select(Meeting).where(Meeting.id == meeting_id, Meeting.workspace_id == workspace_id)
+    )
+    meeting = result.scalar_one_or_none()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if not meeting.proxy_consent_given:
+        raise HTTPException(
+            status_code=400,
+            detail="Consent must be given before the assistant can attend/record on your behalf.",
+        )
+    if body.mode not in ("assistant", "recorder"):
+        raise HTTPException(status_code=400, detail="mode must be 'assistant' or 'recorder'")
+    if get_active_assistant(meeting_id):
+        raise HTTPException(status_code=409, detail="An assistant is already active for this meeting")
+
+    await launch_assistant(
+        meeting_id=meeting_id,
+        workspace_id=workspace_id,
+        owner_name=current_user.full_name or current_user.email,
+        mode=body.mode,
+        assistant_name=body.assistant_name or "AmMeeting",
+        meeting_url=body.meeting_url or None,
+        simulate=body.simulate,
+    )
+    return {
+        "status": "started",
+        "mode": body.mode,
+        "meeting_id": meeting_id,
+        "message": "Assistant agent started. Connect to WebSocket /api/ws/meetings/{meeting_id} for live events.",
+    }
+
+
+# ── One-shot test join: paste a link + "now" or a time → real bot attends ──────
+
+class TestJoinRequest(BaseModel):
+    meeting_url: str
+    when: str = "now"          # "now" or an ISO-8601 datetime
+    mode: str = "recorder"     # "recorder" (silent) | "assistant" (listen + reply)
+    title: str | None = None
+
+
+@router.post("/workspaces/{workspace_id}/meetings/test-join")
+async def test_join(
+    workspace_id: str,
+    body: TestJoinRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Create a meeting from a raw link and send the REAL bot to attend — now, or at a
+    scheduled time (handed to the auto-join scheduler). No simulation."""
+    await require_workspace_role(workspace_id, current_user, db, WorkspaceRole.MEMBER)
+
+    # Real bot only — never silently fall back to the mock provider.
+    if _settings.bot_provider == "mock":
+        raise HTTPException(
+            status_code=503,
+            detail="Live bot is not configured. Start the bot-worker and set BOT_PROVIDER=browser (or recall).",
+        )
+
+    url = body.meeting_url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="Provide a full meeting URL (https://…).")
+    if body.mode not in ("recorder", "assistant"):
+        raise HTTPException(status_code=400, detail="mode must be 'recorder' or 'assistant'")
+
+    platform = detect_platform(url)
+    now = datetime.now(timezone.utc)
+    if body.when == "now":
+        scheduled_at, join_now = now, True
+    else:
+        try:
+            scheduled_at = datetime.fromisoformat(body.when.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="`when` must be 'now' or an ISO datetime.")
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        join_now = scheduled_at <= now + timedelta(minutes=1)
+
+    meeting = Meeting(
+        workspace_id=workspace_id,
+        title=body.title or f"Test join — {platform}",
+        mode=MeetingMode.PROXY,
+        status=MeetingStatus.READY,
+        meeting_url=url,
+        scheduled_at=scheduled_at,
+        proxy_consent_given=True,
+        auto_join_enabled=not join_now,  # future → the running scheduler dispatches it
+    )
+    db.add(meeting)
+    await db.flush()
+    meeting_id = meeting.id
+    db.add(AuditLog(
+        user_id=current_user.id, workspace_id=workspace_id, action="meeting.test_join",
+        resource_type="meeting", resource_id=meeting_id,
+        detail=f"platform={platform} when={body.when} mode={body.mode}",
+    ))
+    await db.commit()
+
+    note = (
+        "Google Meet blocks bots that aren't signed in — the bot will reach the lobby and be "
+        "denied unless you run the one-time google-login. Watch the live status for the exact result."
+        if platform == "google_meet" else None
+    )
+
+    if join_now:
+        await launch_assistant(
+            meeting_id=meeting_id,
+            workspace_id=workspace_id,
+            owner_name=current_user.full_name or current_user.email,
+            mode=body.mode,
+            assistant_name="AmMeeting",
+            meeting_url=url,
+            simulate=False,
+        )
+        return {
+            "meeting_id": meeting_id,
+            "platform": platform,
+            "joining": True,
+            "websocket": f"/api/ws/meetings/{meeting_id}",
+            "note": note,
+            "message": f"Bot is joining the {platform} meeting now — watch live status below.",
+        }
+
+    return {
+        "meeting_id": meeting_id,
+        "platform": platform,
+        "joining": False,
+        "scheduled_at": scheduled_at.isoformat(),
+        "websocket": f"/api/ws/meetings/{meeting_id}",
+        "note": note,
+        "message": f"Scheduled — the bot will auto-join at {scheduled_at.isoformat()}.",
+    }
+
+
+@router.post("/workspaces/{workspace_id}/meetings/{meeting_id}/assistant/stop")
+async def stop_assistant(
+    workspace_id: str,
+    meeting_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Tell the assistant to wrap up, summarize, and leave the meeting."""
+    await require_workspace_role(workspace_id, current_user, db, WorkspaceRole.MEMBER)
+    agent = get_active_assistant(meeting_id)
+    if not agent:
+        return {"status": "not_running", "meeting_id": meeting_id}
+    agent.stop()
+    return {"status": "stopping", "meeting_id": meeting_id}
 
 
 # ── Audio upload → Whisper transcription ──────────────────────────────────

@@ -9,7 +9,7 @@ async def test_register_and_login(client):
     # Register
     r = await client.post("/api/auth/register", json={
         "email": "newuser@ammeet.io",
-        "password": "secure1234",
+        "password": "Secure1234xy",
         "full_name": "New User",
     })
     assert r.status_code == 201
@@ -20,7 +20,7 @@ async def test_register_and_login(client):
     # Login
     r = await client.post("/api/auth/login", json={
         "email": "newuser@ammeet.io",
-        "password": "secure1234",
+        "password": "Secure1234xy",
     })
     assert r.status_code == 200
     tokens = r.json()

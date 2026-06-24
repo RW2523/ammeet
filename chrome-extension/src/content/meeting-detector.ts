@@ -10,6 +10,23 @@
  */
 
 import type { DetectedMeeting, MeetingPlatform, ExtensionMessage } from "../lib/types";
+import { startCaptionCapture, stopCaptionCapture } from "./caption-scraper";
+
+// ─── Notetaker: scrape live captions from THIS tab → service worker ───────────
+// Activated by the side panel via the service worker (NOTETAKER_SET_ACTIVE).
+chrome.runtime.onMessage.addListener((msg: ExtensionMessage) => {
+  if (msg.type === "NOTETAKER_SET_ACTIVE") {
+    if (msg.active) {
+      startCaptionCapture((seg) => {
+        chrome.runtime
+          .sendMessage({ type: "NOTETAKER_CAPTION", speaker: seg.speaker, text: seg.text })
+          .catch(() => {});
+      });
+    } else {
+      stopCaptionCapture();
+    }
+  }
+});
 
 // ─── Platform detection ───────────────────────────────────────────────────────
 

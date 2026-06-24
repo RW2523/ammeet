@@ -132,7 +132,7 @@ async def send_slack_draft(db: AsyncSession, report: Report, channel: str) -> di
     """Send Slack draft — requires explicit user review/trigger."""
     if not report.slack_draft:
         return {"error": "No Slack draft available"}
-    slack = get_slack()
+    slack = await get_slack(db, report.workspace_id)
     result = await slack.send_message(channel, report.slack_draft)
     report.slack_sent = True
     await db.flush()

@@ -23,7 +23,7 @@ import { ApiClient } from "../lib/api";
 import { BrowserSTT } from "../lib/stt";
 import { BrowserTTS } from "../lib/tts";
 import { WSManager } from "../lib/websocket";
-import { getStoredState, getBackendUrl, onStorageChange } from "../lib/store";
+import { getStoredState, getBackendUrl, setBackendUrl as persistBackendUrl, onStorageChange } from "../lib/store";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ function LoginScreen({
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [backendUrl, setBackendUrl] = useState("http://localhost:8000");
+  const [backendUrl, setBackendUrl] = useState("http://localhost:8010");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -168,6 +168,8 @@ function LoginScreen({
     setLoading(true);
     setError("");
     try {
+      // Persist the backend URL shown in the field so LOGIN hits the right server.
+      await persistBackendUrl(backendUrl);
       const resp = await sendSW({ type: "LOGIN", email, password });
       if (resp?.type === "AUTH_STATE_CHANGED") {
         onLogin(resp.auth);
@@ -197,7 +199,7 @@ function LoginScreen({
               value={backendUrl}
               onChange={(e) => setBackendUrl(e.target.value)}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-              placeholder="http://localhost:8000"
+              placeholder="http://localhost:8010"
             />
           </div>
           <div>
@@ -258,12 +260,20 @@ function LoginScreen({
 
 // ─── Main Side Panel ──────────────────────────────────────────────────────────
 
-type Tab = "session" | "transcript" | "questions" | "settings";
+type Tab = "session" | "notetaker" | "transcript" | "questions" | "settings";
+
+const TAB_LABELS: Record<Tab, string> = {
+  session: "🚀 Session",
+  notetaker: "📝 Notes",
+  transcript: "💬 Transcript",
+  questions: "❓ Questions",
+  settings: "⚙️ Settings",
+};
 
 export default function SidePanel() {
   // ── Core state ─────────────────────────────────────────────────────────────
   const [auth, setAuth] = useState<AuthState>({ accessToken: null, refreshToken: null, user: null });
-  const [backendUrl, setBackendUrl] = useState("http://localhost:8000");
+  const [backendUrl, setBackendUrl] = useState("http://localhost:8010");
   const [tab, setTab] = useState<Tab>("session");
 
   // ── Meeting state ──────────────────────────────────────────────────────────
@@ -297,6 +307,12 @@ export default function SidePanel() {
   const [recording, setRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
+
+  // ── Notetaker (bot-free, captures captions from this tab) ─────────────────
+  const [notetakerActive, setNotetakerActive] = useState(false);
+  const [notetakerLines, setNotetakerLines] = useState(0);
+  const [notes, setNotes] = useState<import("../lib/types").NotetakerNotes | null>(null);
+  const [notesLoading, setNotesLoading] = useState(false);
 
   // ── Init ───────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -441,6 +457,17 @@ export default function SidePanel() {
         break;
       case "PROXY_EVENT":
         handleProxyEvent(msg.event);
+        break;
+      case "TRANSCRIPT_LINE":
+        setTranscript((prev) => [...prev.slice(-200), msg.line]);
+        break;
+      case "NOTETAKER_STATE":
+        setNotetakerActive(msg.active);
+        setNotetakerLines(msg.lines);
+        break;
+      case "NOTES_RESULT":
+        setNotes(msg.notes);
+        setNotesLoading(false);
         break;
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -675,24 +702,20 @@ export default function SidePanel() {
 
       {/* Tab bar */}
       <div className="flex border-b border-gray-800 flex-shrink-0 bg-gray-900">
-        {(["session", "transcript", "questions", "settings"] as Tab[]).map((t) => (
+        {(["session", "notetaker", "transcript", "questions", "settings"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={clsx(
-              "flex-1 py-2 text-xs font-semibold capitalize transition border-b-2",
+              "flex-1 py-2 text-[11px] font-semibold capitalize transition border-b-2",
               tab === t
                 ? "border-blue-500 text-blue-400"
                 : "border-transparent text-gray-500 hover:text-gray-300"
             )}
           >
-            {t === "session"
-              ? "🚀 Session"
-              : t === "transcript"
-              ? "💬 Transcript"
-              : t === "questions"
-              ? `❓ Questions${questions.length > 0 ? ` (${questions.length})` : ""}`
-              : "⚙️ Settings"}
+            {t === "questions" && questions.length > 0
+              ? `❓ Questions (${questions.length})`
+              : TAB_LABELS[t]}
           </button>
         ))}
       </div>
@@ -902,6 +925,99 @@ export default function SidePanel() {
                     </div>
                   ))}
                   <div ref={eventsEndRef} />
+                </div>
+              )}
+            </Section>
+          </div>
+        )}
+
+        {/* ── NOTETAKER TAB (bot-free) ──────────────────────────────────────── */}
+        {tab === "notetaker" && (
+          <div className="p-3 space-y-3">
+            <Section title="AI Notetaker (no bot — captures this tab)">
+              <p className="text-gray-500 text-[11px] mb-2">
+                You&apos;re already in the meeting, so no bot needs to join. Turn on the meeting&apos;s
+                <strong> live captions (CC)</strong>, then start the notetaker — it reads the captions
+                from this tab and AmMeeting writes the notes.
+              </p>
+              {!selectedMeeting ? (
+                <p className="text-amber-400 text-[11px]">Pick a workspace &amp; meeting in the 🚀 Session tab first.</p>
+              ) : (
+                <div className="flex items-center gap-2">
+                  {!notetakerActive ? (
+                    <Btn
+                      onClick={() =>
+                        sendSW({ type: "START_NOTETAKER", workspaceId: selectedWorkspace, meetingId: selectedMeeting })
+                      }
+                      variant="green"
+                    >
+                      ● Start notetaker
+                    </Btn>
+                  ) : (
+                    <Btn
+                      onClick={() =>
+                        sendSW({ type: "STOP_NOTETAKER", workspaceId: selectedWorkspace, meetingId: selectedMeeting })
+                      }
+                      variant="red"
+                    >
+                      ■ Stop &amp; finalize
+                    </Btn>
+                  )}
+                  {notetakerActive && (
+                    <span className="text-green-400 text-[11px] animate-pulse">● capturing ({notetakerLines} lines)</span>
+                  )}
+                </div>
+              )}
+            </Section>
+
+            <Section title="Live transcript">
+              <div className="max-h-48 overflow-y-auto space-y-1">
+                {transcript.length === 0 && (
+                  <p className="text-gray-600 text-[11px]">No captions yet — make sure captions (CC) are on in the meeting.</p>
+                )}
+                {transcript.slice(-60).map((l, i) => (
+                  <p key={i} className="text-[11px] text-gray-300">
+                    <span className="text-gray-500">{l.speaker}:</span> {l.text}
+                  </p>
+                ))}
+              </div>
+            </Section>
+
+            <Section title="AI notes">
+              <Btn
+                onClick={async () => {
+                  if (!selectedMeeting) return;
+                  setNotesLoading(true);
+                  try {
+                    const res = await sendSW({ type: "GET_NOTES", workspaceId: selectedWorkspace, meetingId: selectedMeeting });
+                    if (res?.type === "NOTES_RESULT") setNotes(res.notes);
+                    else if (res?.type === "ERROR") addEvent({ type: "error", text: res.message });
+                  } finally {
+                    setNotesLoading(false);
+                  }
+                }}
+                disabled={!selectedMeeting || notesLoading}
+                variant="default"
+              >
+                {notesLoading ? "Generating…" : "✨ Generate notes"}
+              </Btn>
+              {notes && (
+                <div className="mt-2 space-y-2 text-[11px]">
+                  <p className="text-gray-200">{notes.summary}</p>
+                  {!!notes.action_items?.length && (
+                    <div>
+                      <p className="text-gray-500 font-semibold">Action items</p>
+                      {notes.action_items.map((a, i) => (
+                        <p key={i} className="text-gray-300">• {a.title}{a.owner ? ` — ${a.owner}` : ""}{a.deadline ? ` (${a.deadline})` : ""}</p>
+                      ))}
+                    </div>
+                  )}
+                  {!!notes.risks?.length && (
+                    <div>
+                      <p className="text-gray-500 font-semibold">Risks</p>
+                      {notes.risks.map((r, i) => <p key={i} className="text-orange-300">⚠ {r.text}</p>)}
+                    </div>
+                  )}
                 </div>
               )}
             </Section>

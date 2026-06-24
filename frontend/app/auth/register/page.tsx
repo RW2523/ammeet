@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { authApi } from "@/lib/api-client";
+import { GoogleSignInButton } from "@/components/google-signin-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,8 +22,17 @@ export default function RegisterPage() {
     setLoading(true);
     try {
       await authApi.register({ email, password, full_name: fullName });
-      toast.success("Account created! Please sign in.");
-      router.push("/auth/login");
+      toast.success("Account created! Check your inbox for a verification email.");
+      // Try to sign in right away; if the server requires verification first,
+      // fall back to the login page.
+      try {
+        const tokens = await authApi.login({ email, password });
+        localStorage.setItem("access_token", tokens.access_token);
+        localStorage.setItem("refresh_token", tokens.refresh_token);
+        router.push("/onboarding");
+      } catch {
+        router.push("/auth/login");
+      }
     } catch (err: unknown) {
       toast.error((err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "Registration failed");
     } finally {
@@ -57,12 +67,21 @@ export default function RegisterPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password" className="text-slate-300">Password</Label>
-                <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} className="bg-slate-700 border-slate-600 text-white" />
+                <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={10} className="bg-slate-700 border-slate-600 text-white" />
+                <p className="text-xs text-slate-500">At least 10 characters with upper- and lowercase letters and a digit</p>
               </div>
               <Button type="submit" className="w-full" disabled={loading}>
                 {loading ? "Creating account..." : "Create account"}
               </Button>
             </form>
+
+            <div className="my-4 flex items-center gap-3">
+              <div className="h-px flex-1 bg-slate-700" />
+              <span className="text-xs text-slate-500">or</span>
+              <div className="h-px flex-1 bg-slate-700" />
+            </div>
+            <GoogleSignInButton label="Sign up with Google" />
+
             <p className="text-center text-sm text-slate-400 mt-4">
               Already have an account?{" "}
               <a href="/auth/login" className="text-blue-400 hover:underline">Sign in</a>

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Users, Calendar, MessageSquare, BookOpen,
-  Settings, LogOut, ChevronRight, Zap
+  Settings, LogOut, ChevronRight, Zap, CreditCard, Cpu, Radio
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore, useWorkspaceStore } from "@/lib/store";
@@ -13,14 +13,17 @@ import { Button } from "@/components/ui/button";
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/workspaces", label: "Workspaces", icon: Settings },
+  { href: "/settings/ai", label: "AI Model", icon: Cpu },
 ];
 
 const workspaceNavItems = (id: string) => [
   { href: `/workspaces/${id}`, label: "Overview", icon: LayoutDashboard },
   { href: `/workspaces/${id}/people`, label: "People & Roles", icon: Users },
   { href: `/workspaces/${id}/meetings`, label: "Meetings", icon: Calendar },
+  { href: `/workspaces/${id}/test-join`, label: "Live Test (Join)", icon: Radio },
   { href: `/workspaces/${id}/knowledge`, label: "Knowledge Base", icon: BookOpen },
   { href: `/workspaces/${id}/integrations`, label: "Integrations", icon: Zap },
+  { href: `/workspaces/${id}/billing`, label: "Plan & Billing", icon: CreditCard },
 ];
 
 export function Sidebar() {

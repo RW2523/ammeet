@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -51,6 +51,17 @@ class Person(Base):
 
 class Meeting(Base):
     __tablename__ = "meetings"
+    # One auto-join meeting per calendar event per workspace (atomic dedup for the
+    # calendar sweep + sync endpoint, which run in separate sessions).
+    __table_args__ = (
+        Index(
+            "uq_meetings_workspace_calendar_event",
+            "workspace_id",
+            "calendar_event_id",
+            unique=True,
+            postgresql_where=text("calendar_event_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
@@ -69,6 +80,9 @@ class Meeting(Base):
     meeting_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Calendar integration ref
     calendar_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Auto-join: scheduler deploys the proxy bot at scheduled_at when enabled
+    auto_join_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_join_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

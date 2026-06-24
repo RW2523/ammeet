@@ -102,7 +102,24 @@ export type ExtensionMessage =
   | { type: "TRANSCRIPT_LINE"; line: TranscriptLine }
   | { type: "OPEN_SIDEPANEL" }
   | { type: "BOT_STATUS_UPDATE"; status: BotStatus; botId?: string }
+  // ── Notetaker (bot-free, captures from the user's own tab) ────────────────
+  | { type: "START_NOTETAKER"; workspaceId: string; meetingId: string }
+  | { type: "STOP_NOTETAKER"; workspaceId: string; meetingId: string }
+  | { type: "NOTETAKER_SET_ACTIVE"; active: boolean }
+  | { type: "NOTETAKER_CAPTION"; speaker: string; text: string }
+  | { type: "NOTETAKER_STATE"; active: boolean; lines: number }
+  | { type: "GET_NOTES"; workspaceId: string; meetingId: string }
+  | { type: "NOTES_RESULT"; notes: NotetakerNotes }
   | { type: "ERROR"; message: string };
+
+export interface NotetakerNotes {
+  summary: string;
+  key_points?: string[];
+  action_items?: { title: string; owner?: string | null; deadline?: string | null }[];
+  decisions?: { text: string; made_by?: string | null }[];
+  risks?: { text: string; severity?: string }[];
+  open_questions?: string[];
+}
 
 export interface StoredState {
   auth: AuthState;
@@ -114,4 +131,4 @@ export interface StoredState {
   sessionStatus: SessionStatus;
 }
 
-export const DEFAULT_BACKEND_URL = "http://localhost:8000";
+export const DEFAULT_BACKEND_URL = "http://localhost:8010";

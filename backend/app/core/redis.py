@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -8,18 +9,22 @@ from app.core.config import get_settings
 
 _settings = get_settings()
 
-_redis_pool: aioredis.Redis | None = None
+# One pool per event loop — connections cannot be shared across loops
+# (matters under pytest-asyncio, which runs each test in its own loop).
+_redis_pools: dict[int, aioredis.Redis] = {}
 
 
 async def get_redis() -> aioredis.Redis:
-    global _redis_pool
-    if _redis_pool is None:
-        _redis_pool = aioredis.from_url(
+    loop_id = id(asyncio.get_running_loop())
+    pool = _redis_pools.get(loop_id)
+    if pool is None:
+        pool = aioredis.from_url(
             _settings.redis_url,
             encoding="utf-8",
             decode_responses=True,
         )
-    return _redis_pool
+        _redis_pools[loop_id] = pool
+    return pool
 
 
 async def publish_event(channel: str, payload: dict[str, Any]) -> None:
@@ -30,7 +35,7 @@ async def publish_event(channel: str, payload: dict[str, Any]) -> None:
 
 
 async def close_redis() -> None:
-    global _redis_pool
-    if _redis_pool:
-        await _redis_pool.aclose()
-        _redis_pool = None
+    loop_id = id(asyncio.get_running_loop())
+    pool = _redis_pools.pop(loop_id, None)
+    if pool:
+        await pool.aclose()

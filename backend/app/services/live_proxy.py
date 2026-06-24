@@ -167,30 +167,17 @@ class LiveProxySession:
                 "bot_id": self._bot_info.bot_id,
                 "text": f"Bot deployed (id={self._bot_info.bot_id}). Waiting for meeting to start…",
             }
-            await publish_event(f"meeting:{meeting_id}", {
-                "type": "bot_status",
-                "status": self._bot_info.status,
-                "bot_id": self._bot_info.bot_id,
-            })
 
             # Wait for bot to join
             await asyncio.sleep(3)
         else:
             yield {"type": "info", "text": "No meeting URL provided. Running in simulation mode."}
 
-        # ── Step 2: mandatory disclosure ─────────────────────────────────
+        # ── Step 2: mandatory disclosure (spoken into the meeting) ───────
         disclosure = PROXY_DISCLOSURE.format(user_name=self._user_name)
         yield {"type": "disclosure", "text": disclosure}
-        await publish_event(f"meeting:{meeting_id}", {"type": "disclosure", "text": disclosure})
-
-        if self._bot_info:
-            ok = await self._bot_provider.speak_message(self._bot_info.bot_id, disclosure)
-            _logger.info("Bot disclosure spoken: %s", ok)
-
-        # Generate TTS audio of disclosure for frontend playback
-        tts_audio = await self._generate_tts_b64(disclosure)
-        if tts_audio:
-            yield {"type": "tts_audio", "text": disclosure, "audio_b64": tts_audio, "voice": "nova"}
+        async for ev in self._speak(disclosure):
+            yield ev
 
         # ── Step 3: iterate questions ─────────────────────────────────────
         if not self._questions:
@@ -208,30 +195,21 @@ class LiveProxySession:
             if is_restricted_topic(question.text) or question.human_only:
                 question.status = QuestionStatus.ESCALATED
                 await self._db.flush()
-                event = {
+                yield {
                     "type": "escalation",
                     "question_id": question.id,
                     "text": question.text,
                     "reason": "Human-only question or restricted topic",
                 }
-                yield event
-                await publish_event(f"meeting:{meeting_id}", event)
                 continue
 
-            # ── Ask the question ──────────────────────────────────────
+            # ── Ask the question (spoken into the meeting) ────────────
             question.status = QuestionStatus.ASKED
             await self._db.flush()
 
             yield {"type": "asking", "question_id": question.id, "text": question.text}
-            await publish_event(f"meeting:{meeting_id}", {"type": "asking", "question_id": question.id, "text": question.text})
-
-            if self._bot_info:
-                await self._bot_provider.speak_message(self._bot_info.bot_id, question.text)
-
-            # TTS for frontend
-            q_audio = await self._generate_tts_b64(question.text)
-            if q_audio:
-                yield {"type": "tts_audio", "text": question.text, "audio_b64": q_audio}
+            async for ev in self._speak(question.text):
+                yield ev
 
             # ── Wait for / collect answer ─────────────────────────────
             answer_text, speaker = await self._wait_for_answer(question.text, timeout=60)
@@ -241,14 +219,12 @@ class LiveProxySession:
             if esc.get("requires_escalation"):
                 question.status = QuestionStatus.ESCALATED
                 await self._db.flush()
-                event = {
+                yield {
                     "type": "escalation",
                     "question_id": question.id,
                     "answer_preview": answer_text[:200],
                     "reason": esc.get("reason", "Restricted content in answer"),
                 }
-                yield event
-                await publish_event(f"meeting:{meeting_id}", event)
                 continue
 
             # ── Store answer ──────────────────────────────────────────
@@ -273,11 +249,6 @@ class LiveProxySession:
                 "answer": answer_text,
                 "analysis": analysis,
             }
-            await publish_event(f"meeting:{meeting_id}", {
-                "type": "answered",
-                "question_id": question.id,
-                "answer": answer_text[:300],
-            })
 
             # ── Clarifying question if answer was incomplete ──────────
             if not analysis.get("is_complete", True):
@@ -286,14 +257,8 @@ class LiveProxySession:
                 )
                 if clarify:
                     yield {"type": "clarifying", "question_id": question.id, "text": clarify}
-                    await publish_event(f"meeting:{meeting_id}", {"type": "clarifying", "text": clarify})
-
-                    if self._bot_info:
-                        await self._bot_provider.speak_message(self._bot_info.bot_id, clarify)
-
-                    c_audio = await self._generate_tts_b64(clarify)
-                    if c_audio:
-                        yield {"type": "tts_audio", "text": clarify, "audio_b64": c_audio}
+                    async for ev in self._speak(clarify):
+                        yield ev
 
             await asyncio.sleep(0.2)
 
@@ -303,15 +268,25 @@ class LiveProxySession:
             "A full meeting report will be prepared and shared shortly."
         )
         yield {"type": "session_complete", "text": closing}
-        await publish_event(f"meeting:{meeting_id}", {"type": "session_complete", "text": closing})
-
-        if self._bot_info:
-            await self._bot_provider.speak_message(self._bot_info.bot_id, closing)
-            c_audio = await self._generate_tts_b64(closing)
-            if c_audio:
-                yield {"type": "tts_audio", "text": closing, "audio_b64": c_audio}
+        async for ev in self._speak(closing):
+            yield ev
 
     # ── Helpers ─────────────────────────────────────────────────────────────
+
+    async def _speak(self, text: str) -> AsyncGenerator[dict[str, Any], None]:
+        """Synthesize `text` once, play it INTO the meeting via the bot (so other
+        participants hear it), and yield a browser-playback event with the same audio."""
+        audio_bytes = await self._synthesize(text)
+        if self._bot_info and audio_bytes:
+            ok = await self._bot_provider.output_audio(self._bot_info.bot_id, audio_bytes)
+            _logger.info("Bot output_audio (%d bytes): %s", len(audio_bytes), ok)
+        if audio_bytes:
+            import base64
+            yield {
+                "type": "tts_audio",
+                "text": text,
+                "audio_b64": base64.b64encode(audio_bytes).decode("utf-8"),
+            }
 
     async def _wait_for_answer(
         self,
@@ -422,14 +397,11 @@ class LiveProxySession:
         except Exception:
             return None
 
-    async def _generate_tts_b64(self, text: str) -> str | None:
-        """Generate TTS audio and return as base64 string, or None on error."""
+    async def _synthesize(self, text: str) -> bytes | None:
+        """Generate TTS MP3 bytes, or None on error / when TTS is disabled."""
         try:
             audio_bytes = await self._tts.synthesize(text)
-            if not audio_bytes:
-                return None
-            import base64
-            return base64.b64encode(audio_bytes).decode("utf-8")
+            return audio_bytes or None
         except Exception as exc:
             _logger.warning("TTS synthesis failed (non-fatal): %s", exc)
             return None
@@ -474,3 +446,69 @@ def register_session(meeting_id: str, session: LiveProxySession) -> None:
 
 def unregister_session(meeting_id: str) -> None:
     _active_sessions.pop(meeting_id, None)
+
+
+async def launch_session(
+    meeting_id: str,
+    workspace_id: str,
+    user_name: str,
+    meeting_url: str | None,
+    simulate: bool = False,
+) -> None:
+    """Start a live proxy session in the background with its OWN DB session.
+
+    Used by both the manual bot/join endpoint and the auto-join scheduler. Each
+    yielded event is published to Redis so any connected WebSocket client receives
+    it (the WS endpoint bridges Redis → browser). Runs as a fire-and-forget task.
+    """
+    import asyncio as _asyncio
+
+    from app.core.database import AsyncSessionLocal
+    from app.models.meeting import Meeting, MeetingStatus, Question, QuestionStatus
+
+    async def _runner() -> None:
+        async with AsyncSessionLocal() as db:
+            try:
+                result = await db.execute(
+                    select(Meeting).where(Meeting.id == meeting_id, Meeting.workspace_id == workspace_id)
+                )
+                meeting = result.scalar_one_or_none()
+                if not meeting:
+                    _logger.warning("launch_session: meeting %s not found", meeting_id)
+                    return
+
+                if meeting_url and not simulate:
+                    meeting.meeting_url = meeting_url
+                meeting.status = MeetingStatus.IN_PROGRESS
+                await db.commit()
+
+                q_result = await db.execute(
+                    select(Question).where(
+                        Question.meeting_id == meeting_id,
+                        Question.proxy_allowed == True,  # noqa: E712
+                        Question.status == QuestionStatus.PENDING,
+                    )
+                )
+                questions = list(q_result.scalars().all())
+
+                session = LiveProxySession(
+                    db=db,
+                    meeting=meeting,
+                    user_name=user_name,
+                    questions=questions,
+                    meeting_url=None if simulate else meeting_url,
+                )
+                register_session(meeting_id, session)
+                try:
+                    async for event in session.run():
+                        await publish_event(f"meeting:{meeting_id}", event)
+                finally:
+                    unregister_session(meeting_id)
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+            except Exception as exc:
+                _logger.exception("launch_session runner failed for %s: %s", meeting_id, exc)
+
+    _asyncio.create_task(_runner())
