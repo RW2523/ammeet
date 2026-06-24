@@ -56,8 +56,8 @@ class MeetingBotProvider(ABC):
         ...
 
     @abstractmethod
-    async def speak_message(self, bot_id: str, text: str) -> bool:
-        """Make the bot speak a message in the meeting via TTS injection."""
+    async def output_audio(self, bot_id: str, mp3_bytes: bytes) -> bool:
+        """Play synthesized audio (MP3 bytes) into the live meeting so participants hear it."""
         ...
 
     @abstractmethod

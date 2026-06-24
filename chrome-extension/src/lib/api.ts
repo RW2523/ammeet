@@ -130,6 +130,37 @@ export class ApiClient {
     });
   }
 
+  // ── Notetaker (bot-free, tab-captured transcript) ──────────────────────────
+
+  async appendTranscript(
+    workspaceId: string,
+    meetingId: string,
+    segments: { speaker: string; text: string }[]
+  ): Promise<{ appended: number; total_lines: number }> {
+    return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/notetaker/transcript`, {
+      method: "POST",
+      body: JSON.stringify({ segments }),
+    });
+  }
+
+  async getNotes(
+    workspaceId: string,
+    meetingId: string
+  ): Promise<import("./types").NotetakerNotes> {
+    return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/notetaker/notes`, {
+      method: "POST",
+    });
+  }
+
+  async finalizeNotetaker(
+    workspaceId: string,
+    meetingId: string
+  ): Promise<{ finalized: boolean; chunks_indexed: number }> {
+    return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/notetaker/finalize`, {
+      method: "POST",
+    });
+  }
+
   // ── Transcription ─────────────────────────────────────────────────────────
 
   async transcribeAudio(

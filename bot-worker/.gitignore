@@ -1,0 +1,3 @@
+bot-worker/node_modules/
+recordings/*
+!recordings/.gitkeep

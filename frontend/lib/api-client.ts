@@ -1,5 +1,5 @@
 import { api } from "./api";
-import type { ActionItem, Meeting, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
+import type { ActionItem, CalendarEvent, Meeting, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
 
 // Auth
 export const authApi = {
@@ -10,6 +10,35 @@ export const authApi = {
   me: () => api.get<User>("/auth/me").then((r) => r.data),
   setupMfa: () => api.post<{ secret: string; uri: string }>("/auth/mfa/setup").then((r) => r.data),
   verifyMfa: (code: string) => api.post("/auth/mfa/verify", { code }).then((r) => r.data),
+  verifyEmail: (token: string) =>
+    api.post<{ verified: boolean }>("/auth/verify-email", { token }).then((r) => r.data),
+  resendVerification: (email: string) =>
+    api.post<{ sent: boolean }>("/auth/resend-verification", { email }).then((r) => r.data),
+  forgotPassword: (email: string) =>
+    api.post<{ sent: boolean }>("/auth/forgot-password", { email }).then((r) => r.data),
+  resetPassword: (token: string, new_password: string) =>
+    api.post<{ reset: boolean }>("/auth/reset-password", { token, new_password }).then((r) => r.data),
+};
+
+// Billing
+export interface BillingInfo {
+  plan: string;
+  subscription_status: string | null;
+  current_period_end: string | null;
+  billing_enabled: boolean;
+  usage: Record<string, { used: number; limit: number | null }>;
+  plans: { id: string; price_usd_monthly: number; limits: Record<string, number | null> }[];
+}
+
+export const billingApi = {
+  get: (workspaceId: string) =>
+    api.get<BillingInfo>(`/workspaces/${workspaceId}/billing`).then((r) => r.data),
+  checkout: (workspaceId: string, plan: string) =>
+    api.post<{ mock: boolean; plan?: string; checkout_url: string | null }>(
+      `/workspaces/${workspaceId}/billing/checkout`, { plan }
+    ).then((r) => r.data),
+  portal: (workspaceId: string) =>
+    api.post<{ portal_url: string }>(`/workspaces/${workspaceId}/billing/portal`).then((r) => r.data),
 };
 
 // Workspaces
@@ -32,10 +61,77 @@ export const peopleApi = {
     api.delete(`/workspaces/${workspaceId}/people/${personId}`),
 };
 
+// LLM / AI model settings
+export interface LLMProviderInfo {
+  id: string;
+  label: string;
+  default_model: string;
+  models: string[];
+  default_base_url: string;
+  supports_embeddings: boolean;
+  key_hint: string;
+}
+
+export interface LLMConfigInfo {
+  provider: string;
+  model: string;
+  embedding_model: string | null;
+  base_url: string | null;
+  has_key: boolean;
+  key_preview: string | null;
+  source: string;
+}
+
+export const llmApi = {
+  providers: () =>
+    api.get<{ providers: LLMProviderInfo[] }>("/llm/providers").then((r) => r.data.providers),
+  getConfig: () => api.get<LLMConfigInfo>("/llm/config").then((r) => r.data),
+  setConfig: (data: {
+    provider: string;
+    model?: string;
+    api_key?: string;
+    embedding_model?: string;
+    base_url?: string;
+  }) => api.put("/llm/config", data).then((r) => r.data),
+  test: () =>
+    api.post<{ ok: boolean; provider?: string; model?: string; sample?: string; error?: string }>(
+      "/llm/test"
+    ).then((r) => r.data),
+};
+
+// Calendar
+export const calendarApi = {
+  events: (workspaceId: string) =>
+    api.get<CalendarEvent[]>(`/workspaces/${workspaceId}/calendar/events`).then((r) => r.data),
+  syncAutoJoin: (workspaceId: string, autoJoin = true) =>
+    api
+      .post<{ status: string; scanned: number; created: number; skipped: number }>(
+        `/workspaces/${workspaceId}/calendar/sync?auto_join=${autoJoin}`
+      )
+      .then((r) => r.data),
+};
+
 // Meetings
+export interface TestJoinResult {
+  meeting_id: string;
+  platform: string;
+  joining: boolean;
+  websocket: string;
+  scheduled_at?: string;
+  note?: string | null;
+  message: string;
+}
+
 export const meetingApi = {
   list: (workspaceId: string) =>
     api.get<Meeting[]>(`/workspaces/${workspaceId}/meetings`).then((r) => r.data),
+  /** Paste a link + "now"/ISO time → real bot attends. */
+  testJoin: (
+    workspaceId: string,
+    data: { meeting_url: string; when: string; mode: "recorder" | "assistant"; title?: string }
+  ) => api.post<TestJoinResult>(`/workspaces/${workspaceId}/meetings/test-join`, data).then((r) => r.data),
+  stopAssistant: (workspaceId: string, meetingId: string) =>
+    api.post(`/workspaces/${workspaceId}/meetings/${meetingId}/assistant/stop`).then((r) => r.data),
   get: (workspaceId: string, meetingId: string) =>
     api.get<Meeting>(`/workspaces/${workspaceId}/meetings/${meetingId}`).then((r) => r.data),
   create: (workspaceId: string, data: Partial<Meeting>) =>
@@ -97,6 +193,21 @@ export const integrationApi = {
     api.post(`/workspaces/${workspaceId}/integrations/${provider}/connect`).then((r) => r.data),
   disconnect: (workspaceId: string, provider: string) =>
     api.delete(`/workspaces/${workspaceId}/integrations/${provider}/disconnect`).then((r) => r.data),
+};
+
+// Meeting Assistant agent
+export const assistantApi = {
+  start: (
+    workspaceId: string,
+    meetingId: string,
+    data: { mode: "assistant" | "recorder"; meeting_url?: string; simulate?: boolean; assistant_name?: string }
+  ) =>
+    api.post<{ status: string; mode: string; message: string }>(
+      `/workspaces/${workspaceId}/meetings/${meetingId}/assistant/start`,
+      data
+    ).then((r) => r.data),
+  stop: (workspaceId: string, meetingId: string) =>
+    api.post<{ status: string }>(`/workspaces/${workspaceId}/meetings/${meetingId}/assistant/stop`).then((r) => r.data),
 };
 
 // Live session / meeting bot

@@ -22,7 +22,7 @@ from app.models.meeting import (
     QuestionStatus,
     Risk,
 )
-from app.models.user import AuditLog, User, WorkspaceRole
+from app.models.user import AuditLog, User, Workspace, WorkspaceRole
 from app.schemas.meeting import (
     ActionItemOut,
     AnswerCreate,
@@ -34,7 +34,9 @@ from app.schemas.meeting import (
     PrepBriefOut,
     RiskOut,
 )
+from app.services.billing import check_and_increment_usage
 from app.services.extraction import chunk_text, extract_from_text
+from app.services.calendar_sync import sync_workspace_calendar
 from app.services.integrations import get_calendar, get_jira
 from app.services.knowledge_rag import store_chunks
 from app.services.question_generator import generate_questions
@@ -72,6 +74,48 @@ async def create_meeting(
         detail=meeting.title,
     ))
     return meeting
+
+
+@router.get("/{workspace_id}/calendar/events")
+async def list_calendar_events(
+    workspace_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Upcoming calendar events (with join links) for the connected calendar.
+
+    Returns real Google Calendar events when the workspace has connected Google
+    Calendar via OAuth, otherwise mock fixtures. Used to create a meeting (and
+    auto-join bot) directly from a calendar event.
+    """
+    await require_workspace_role(workspace_id, user, db, WorkspaceRole.MEMBER)
+    calendar = await get_calendar(db, workspace_id)
+    events = await calendar.get_upcoming_events(workspace_id)
+    return events
+
+
+@router.post("/{workspace_id}/calendar/sync")
+async def sync_calendar_auto_join(
+    workspace_id: str,
+    auto_join: bool = True,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Auto-discover upcoming calendar events with join links and create auto-join
+    meetings for them. Triggering this is the user's consent to let the bot attend.
+    Idempotent — re-running only adds newly-discovered events."""
+    await require_workspace_role(workspace_id, user, db, WorkspaceRole.MEMBER)
+    stats = await sync_workspace_calendar(db, workspace_id, enable_auto_join=auto_join)
+    # Record who enabled auto-attend and how many meetings it covered (consent trail).
+    db.add(AuditLog(
+        user_id=user.id,
+        workspace_id=workspace_id,
+        action="calendar.auto_join_sync",
+        resource_type="workspace",
+        resource_id=workspace_id,
+        detail=f"auto_join={auto_join} created={stats['created']} scanned={stats['scanned']}",
+    ))
+    return {"status": "ok", **stats}
 
 
 @router.get("/{workspace_id}/meetings", response_model=list[MeetingOut])
@@ -239,10 +283,10 @@ async def get_prep_brief(
     people_result = await db.execute(select(Person).where(Person.workspace_id == workspace_id))
     people = list(people_result.scalars().all())
 
-    jira = get_jira()
+    jira = await get_jira(db, workspace_id)
     jira_tickets = await jira.get_tickets(workspace_id)
 
-    calendar = get_calendar()
+    calendar = await get_calendar(db, workspace_id)
     events = await calendar.get_upcoming_events(workspace_id)
     attendees = []
     for event in events:
@@ -318,10 +362,14 @@ async def generate_meeting_questions(
     await require_workspace_role(workspace_id, user, db, WorkspaceRole.MEMBER)
     meeting = await _get_meeting_or_404(workspace_id, meeting_id, db)
 
+    workspace_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
+    workspace = workspace_result.scalar_one()
+    await check_and_increment_usage(db, workspace, "ai_question_batches")
+
     people_result = await db.execute(select(Person).where(Person.workspace_id == workspace_id))
     people = [{"name": p.name, "role": p.role, "current_work": p.current_work, "follow_up": p.follow_up} for p in people_result.scalars().all()]
 
-    jira = get_jira()
+    jira = await get_jira(db, workspace_id)
     jira_tickets = await jira.get_tickets(workspace_id)
 
     # Get knowledge chunks

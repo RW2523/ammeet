@@ -45,7 +45,21 @@ export interface Meeting {
   ended_at: string | null;
   proxy_consent_given: boolean;
   proxy_intro_logged: boolean;
+  meeting_url: string | null;
+  calendar_event_id: string | null;
+  auto_join_enabled: boolean;
   created_at: string;
+}
+
+export interface CalendarEvent {
+  id: string;
+  title: string;
+  start: string | null;
+  end: string | null;
+  attendees: { name: string; email: string }[];
+  description?: string | null;
+  recurring?: boolean;
+  meet_link?: string | null;
 }
 
 export type QuestionPriority = "must_ask" | "if_time" | "ask_later" | "answered" | "needs_human";

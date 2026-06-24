@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { authApi } from "@/lib/api-client";
 import { useAuthStore } from "@/lib/store";
+import { GoogleSignInButton } from "@/components/google-signin-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +19,21 @@ export default function LoginPage() {
   const [totpCode, setTotpCode] = useState("");
   const [needsMfa, setNeedsMfa] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const err = new URLSearchParams(window.location.search).get("error");
+    if (!err) return;
+    const messages: Record<string, string> = {
+      google_not_configured: "Google sign-in isn't configured on this server yet.",
+      google_state: "Google sign-in expired or was tampered with. Please try again.",
+      google_failed: "Google sign-in failed. Please try again.",
+      google_unverified: "Your Google email isn't verified, so we can't link it to an existing account. Sign in with your password instead.",
+      google_account_conflict: "This email is already linked to a different Google account. Use the original one.",
+      account_disabled: "That account is disabled.",
+    };
+    toast.error(messages[err] || "Sign-in failed.");
+    window.history.replaceState(null, "", "/auth/login");
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -100,10 +116,22 @@ export default function LoginPage() {
                 {loading ? "Signing in..." : "Sign in"}
               </Button>
             </form>
+
+            <div className="my-4 flex items-center gap-3">
+              <div className="h-px flex-1 bg-slate-700" />
+              <span className="text-xs text-slate-500">or</span>
+              <div className="h-px flex-1 bg-slate-700" />
+            </div>
+            <GoogleSignInButton />
+
             <p className="text-center text-sm text-slate-400 mt-4">
               No account?{" "}
               <a href="/auth/register" className="text-blue-400 hover:underline">
                 Create one
+              </a>
+              {" · "}
+              <a href="/auth/forgot-password" className="text-blue-400 hover:underline">
+                Forgot password?
               </a>
             </p>
           </CardContent>

@@ -83,37 +83,8 @@ export default function LiveMeetingRoomPage() {
     setEvents((prev) => [...prev.slice(-200), { ...event, id, ts }]);
   }, []);
 
-  useEffect(() => {
-    if (!meetingId) return;
-
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const wsUrl = apiBase.replace(/^http/, "ws") + `/api/ws/meetings/${meetingId}`;
-
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log("WebSocket connected for meeting", meetingId);
-    };
-
-    ws.onmessage = (e) => {
-      try {
-        const event: ProxyEvent = JSON.parse(e.data);
-        handleIncomingEvent(event);
-      } catch {
-        // ignore
-      }
-    };
-
-    ws.onerror = (e) => console.error("WS error:", e);
-    ws.onclose = () => console.log("WS disconnected");
-
-    return () => {
-      ws.close();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingId]);
-
+  // Declared before the WebSocket effect below so the effect's onmessage closure
+  // does not reference it before initialization (react-hooks/immutability).
   const handleIncomingEvent = useCallback((event: ProxyEvent) => {
     addEvent(event);
 
@@ -151,6 +122,36 @@ export default function LiveMeetingRoomPage() {
     }
   }, [addEvent]);
 
+  useEffect(() => {
+    if (!meetingId) return;
+
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const wsUrl = apiBase.replace(/^http/, "ws") + `/api/ws/meetings/${meetingId}`;
+
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log("WebSocket connected for meeting", meetingId);
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const event: ProxyEvent = JSON.parse(e.data);
+        handleIncomingEvent(event);
+      } catch {
+        // ignore
+      }
+    };
+
+    ws.onerror = (e) => console.error("WS error:", e);
+    ws.onclose = () => console.log("WS disconnected");
+
+    return () => {
+      ws.close();
+    };
+  }, [meetingId, handleIncomingEvent]);
+
   // Auto-scroll event list
   useEffect(() => {
     if (eventListRef.current) {
@@ -159,6 +160,9 @@ export default function LiveMeetingRoomPage() {
   }, [events]);
 
   // ── Audio playback queue ──────────────────────────────────────────────────
+  // Dequeue-and-play legitimately updates state inside the effect; it is guarded
+  // by `playingAudio` so it cannot loop, and `playingAudio` drives the UI badge.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!playingAudio && audioQueue.length > 0) {
       const [next, ...rest] = audioQueue;
@@ -172,6 +176,7 @@ export default function LiveMeetingRoomPage() {
       audio.play().catch(() => setPlayingAudio(false));
     }
   }, [audioQueue, playingAudio]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ── Mutations ─────────────────────────────────────────────────────────────
   const joinMutation = useMutation({
@@ -524,7 +529,7 @@ export default function LiveMeetingRoomPage() {
                   )}
                   {event.type === "tts_audio" && (
                     <p className="text-indigo-300 mt-1 italic text-xs">
-                      🔊 "{event.text?.slice(0, 60)}{(event.text?.length ?? 0) > 60 ? "…" : ""}"
+                      🔊 &quot;{event.text?.slice(0, 60)}{(event.text?.length ?? 0) > 60 ? "…" : ""}&quot;
                     </p>
                   )}
                 </div>

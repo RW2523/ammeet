@@ -1,0 +1,16 @@
+{
+  "name": "ammeet-bot-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "google-login": "node scripts/google-login.js",
+    "check-login": "node scripts/check-login.js",
+    "probe": "node scripts/probe-jitsi.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "playwright": "1.49.1"
+  }
+}

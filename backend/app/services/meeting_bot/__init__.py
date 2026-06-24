@@ -80,8 +80,8 @@ class MockMeetingBotProvider(MeetingBotProvider):
         await asyncio.sleep(0.2)
         return True
 
-    async def speak_message(self, bot_id: str, text: str) -> bool:
-        await asyncio.sleep(0.3)
+    async def output_audio(self, bot_id: str, mp3_bytes: bytes) -> bool:
+        await asyncio.sleep(0.1)
         return True
 
     async def get_transcript(self, bot_id: str) -> list[TranscriptSegment]:
@@ -102,5 +102,9 @@ def get_bot_provider() -> MeetingBotProvider:
             )
         from app.services.meeting_bot.recall import RecallAIBotProvider
         return RecallAIBotProvider()
+
+    if settings.bot_provider == "browser":
+        from app.services.meeting_bot.browser import BrowserBotProvider
+        return BrowserBotProvider()
 
     return MockMeetingBotProvider()

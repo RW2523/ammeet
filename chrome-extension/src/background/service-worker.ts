@@ -44,12 +44,45 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
 });
 
-// ── Side panel: open on browser action click ─────────────────────────────────
+// ── Side panel: clicking the toolbar icon opens the side panel ───────────────
+// (No default_popup in the manifest, so the icon click opens the panel directly.)
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((e) => console.warn("[AmMeeting SW] setPanelBehavior:", e));
+
 chrome.action.onClicked.addListener(async (tab) => {
   if (tab.id) {
-    await chrome.sidePanel.open({ tabId: tab.id });
+    try {
+      await chrome.sidePanel.open({ tabId: tab.id });
+    } catch {
+      /* openPanelOnActionClick already handled it */
+    }
   }
 });
+
+// ── Notetaker: buffer captions and flush to the backend ──────────────────────
+const _ntBuffer: { speaker: string; text: string }[] = [];
+let _ntFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let _ntLines = 0;
+
+async function flushNotetaker() {
+  _ntFlushTimer = null;
+  if (_ntBuffer.length === 0) return;
+  const state = await getStoredState();
+  const auth = await getAuth();
+  const ws = state.currentWorkspaceId;
+  const mid = state.currentMeetingId;
+  if (!ws || !mid || !auth.accessToken) return;
+  const batch = _ntBuffer.splice(0, _ntBuffer.length);
+  try {
+    const api = new ApiClient(await getBackendUrl(), auth.accessToken);
+    const res = await api.appendTranscript(ws, mid, batch);
+    _ntLines = res.total_lines;
+    broadcastToAll({ type: "NOTETAKER_STATE", active: true, lines: _ntLines });
+  } catch {
+    // Backend unreachable — drop this batch (captions keep flowing)
+  }
+}
 
 // ── Main message handler ──────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg: ExtensionMessage, sender, sendResponse) => {
@@ -183,6 +216,56 @@ async function handleMessage(
       await setStoredState({ sessionStatus: "inactive", botStatus: "idle" });
       broadcastToAll({ type: "SESSION_STOPPED" });
       return { type: "SESSION_STOPPED" };
+    }
+
+    // ── Notetaker (bot-free, captures captions from the user's own tab) ──────
+    case "START_NOTETAKER": {
+      await setStoredState({
+        currentWorkspaceId: msg.workspaceId,
+        currentMeetingId: msg.meetingId,
+        sessionStatus: "active",
+      });
+      const state = await getStoredState();
+      const tabId = state.detectedMeeting?.tabId;
+      if (tabId && tabId > 0) {
+        chrome.tabs.sendMessage(tabId, { type: "NOTETAKER_SET_ACTIVE", active: true }).catch(() => {});
+      }
+      _ntLines = 0;
+      broadcastToAll({ type: "NOTETAKER_STATE", active: true, lines: 0 });
+      return { type: "NOTETAKER_STATE", active: true, lines: 0 };
+    }
+
+    case "STOP_NOTETAKER": {
+      const state = await getStoredState();
+      const tabId = state.detectedMeeting?.tabId;
+      if (tabId && tabId > 0) {
+        chrome.tabs.sendMessage(tabId, { type: "NOTETAKER_SET_ACTIVE", active: false }).catch(() => {});
+      }
+      await flushNotetaker();
+      try {
+        await api.finalizeNotetaker(msg.workspaceId, msg.meetingId);
+      } catch {
+        /* best-effort */
+      }
+      await setStoredState({ sessionStatus: "inactive" });
+      broadcastToAll({ type: "NOTETAKER_STATE", active: false, lines: _ntLines });
+      return { type: "NOTETAKER_STATE", active: false, lines: _ntLines };
+    }
+
+    case "NOTETAKER_CAPTION": {
+      _ntBuffer.push({ speaker: msg.speaker, text: msg.text });
+      // Mirror the line to the side panel immediately for live display
+      broadcastToAll({
+        type: "TRANSCRIPT_LINE",
+        line: { speaker: msg.speaker, text: msg.text, is_final: true, ts: Date.now() },
+      });
+      if (!_ntFlushTimer) _ntFlushTimer = setTimeout(() => void flushNotetaker(), 2500);
+      return null;
+    }
+
+    case "GET_NOTES": {
+      const notes = await api.getNotes(msg.workspaceId, msg.meetingId);
+      return { type: "NOTES_RESULT", notes };
     }
 
     // ── Open side panel ─────────────────────────────────────────────────────

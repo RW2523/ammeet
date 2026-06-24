@@ -626,6 +626,12 @@ function ProxyRoom({
           >
             🚀 Go Live (Real Meeting Bot)
           </Link>
+          <Link
+            href={`/workspaces/${meeting.workspace_id}/meetings/${meeting.id}/assistant`}
+            className="inline-flex items-center gap-2 ml-4 bg-blue-700 hover:bg-blue-600 text-white rounded-lg px-6 py-2.5 text-sm font-semibold transition"
+          >
+            🤖 Meeting Assistant (listen &amp; reply / record)
+          </Link>
           {approvedCount === 0 && (
             <p className="text-orange-400 text-sm mt-3">
               No questions are approved for proxy. Go to Questions tab and enable proxy for at least one question.
@@ -661,7 +667,7 @@ function ProxyRoom({
                       {evt.type === "asking" && (
                         <div>
                           <p className="font-medium text-white mb-1">AmMeeting asks:</p>
-                          <p className="italic">"{evt.text}"</p>
+                          <p className="italic">&quot;{evt.text}&quot;</p>
                         </div>
                       )}
                       {evt.type === "answered" && (
@@ -680,7 +686,7 @@ function ProxyRoom({
                       {evt.type === "disclosure" && (
                         <div>
                           <p className="font-medium mb-1">AmMeeting introduction:</p>
-                          <p className="italic">"{evt.text}"</p>
+                          <p className="italic">&quot;{evt.text}&quot;</p>
                         </div>
                       )}
                       {(evt.type === "clarifying" || evt.type === "info" || evt.type === "session_complete") && (

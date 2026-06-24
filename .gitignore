@@ -49,3 +49,8 @@ Thumbs.db
 # Docker volumes (local)
 pgdata/
 redisdata/
+
+# Bot-worker: signed-in Chrome profile (session data) + local recordings
+bot-worker/profile/
+bot-worker/recordings/*
+!bot-worker/recordings/.gitkeep

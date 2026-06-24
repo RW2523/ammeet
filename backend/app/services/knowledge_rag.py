@@ -12,6 +12,9 @@ from app.services.llm import get_llm
 
 _logger = get_logger(__name__)
 
+# Dimension of the pgvector `embedding` column (OpenAI text-embedding-3-small)
+EMBEDDING_DIM = 1536
+
 
 async def store_chunks(
     db: AsyncSession,
@@ -41,9 +44,15 @@ async def store_chunks(
             chunk_index=i,
             metadata_json=json.dumps(metadata) if metadata else None,
         )
-        # Store embedding as JSON text (works without pgvector extension too)
-        if embedding is not None:
-            chunk.embedding = json.dumps(embedding)  # type: ignore[assignment]
+        # The pgvector column is fixed at 1536 dims (OpenAI text-embedding-3-small).
+        # Store the list directly (pgvector binds a list/array); only when the
+        # dimension matches and the column exists, otherwise leave NULL → keyword search.
+        if (
+            embedding is not None
+            and len(embedding) == EMBEDDING_DIM
+            and hasattr(chunk, "embedding")
+        ):
+            chunk.embedding = embedding  # type: ignore[assignment]
         db.add(chunk)
 
     await db.flush()
@@ -63,29 +72,32 @@ async def similarity_search(
         # Fall back to text-only search
         return await _text_search(db, workspace_id, query, limit)
 
-    # Try pgvector cosine similarity
+    # Try pgvector cosine similarity inside a SAVEPOINT so that a failure (e.g. a
+    # provider whose embedding dimension differs from the stored vectors) rolls back
+    # only this query and leaves the request transaction usable for the keyword fallback.
+    ids: list[str] = []
     try:
         embedding_str = json.dumps(query_embedding)
-        rows = await db.execute(
-            text(
-                """
-                SELECT id FROM knowledge_chunks
-                WHERE workspace_id = :wid
-                  AND embedding IS NOT NULL
-                ORDER BY embedding::vector <=> :emb::vector
-                LIMIT :lim
-                """
-            ),
-            {"wid": workspace_id, "emb": embedding_str, "lim": limit},
-        )
-        ids = [r[0] for r in rows]
-        if ids:
-            result = await db.execute(
-                select(KnowledgeChunk).where(KnowledgeChunk.id.in_(ids))
+        async with db.begin_nested():
+            rows = await db.execute(
+                text(
+                    """
+                    SELECT id FROM knowledge_chunks
+                    WHERE workspace_id = :wid
+                      AND embedding IS NOT NULL
+                    ORDER BY embedding::vector <=> :emb::vector
+                    LIMIT :lim
+                    """
+                ),
+                {"wid": workspace_id, "emb": embedding_str, "lim": limit},
             )
-            return list(result.scalars().all())
+            ids = [r[0] for r in rows]
     except Exception as exc:
         _logger.warning("Vector search failed, falling back to text search: %s", exc)
+
+    if ids:
+        result = await db.execute(select(KnowledgeChunk).where(KnowledgeChunk.id.in_(ids)))
+        return list(result.scalars().all())
 
     return await _text_search(db, workspace_id, query, limit)
 

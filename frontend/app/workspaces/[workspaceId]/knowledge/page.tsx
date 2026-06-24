@@ -109,7 +109,7 @@ export default function KnowledgePage() {
         {history.map((item, i) => (
           <Card key={i} className="bg-slate-900 border-slate-800">
             <CardHeader className="pb-2">
-              <p className="text-sm font-medium text-blue-300">"{item.query}"</p>
+              <p className="text-sm font-medium text-blue-300">&quot;{item.query}&quot;</p>
             </CardHeader>
             <CardContent className="pt-0">
               <p className="text-slate-300 leading-relaxed">{item.answer}</p>
@@ -119,7 +119,7 @@ export default function KnowledgePage() {
                   <div className="flex gap-2 flex-wrap">
                     {(item.sources as Array<{ source_type: string; excerpt: string }>).map((s, j) => (
                       <div key={j} className="text-xs bg-slate-800 rounded px-2 py-1 text-slate-400">
-                        {s.source_type}: "{s.excerpt}"
+                        {s.source_type}: &quot;{s.excerpt}&quot;
                       </div>
                     ))}
                   </div>

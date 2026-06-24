@@ -102,13 +102,41 @@ class MockSlackProvider:
         return {"ok": True, "user": user_email, "stub": True}
 
 
-def get_jira() -> MockJiraProvider:
+async def get_jira(db=None, workspace_id: str | None = None):
+    """Real Jira when the workspace has a connected OAuth integration, else mock."""
+    if db is not None and workspace_id:
+        from app.services.integrations.oauth_providers import JiraProvider, load_tokens
+
+        tokens = await load_tokens(db, workspace_id, "jira")
+        if tokens and tokens.get("access_token") and tokens.get("cloud_id"):
+            return JiraProvider(tokens["access_token"], tokens["cloud_id"])
     return MockJiraProvider()
 
 
-def get_calendar() -> MockCalendarProvider:
+async def get_calendar(db=None, workspace_id: str | None = None):
+    """Return the connected calendar provider: Google, else Microsoft, else mock."""
+    if db is not None and workspace_id:
+        from app.services.integrations.oauth_providers import (
+            GoogleCalendarProvider,
+            MicrosoftCalendarProvider,
+            load_tokens,
+        )
+
+        google = await load_tokens(db, workspace_id, "google_calendar")
+        if google and google.get("access_token"):
+            return GoogleCalendarProvider(google["access_token"])
+
+        microsoft = await load_tokens(db, workspace_id, "microsoft_teams")
+        if microsoft and microsoft.get("access_token"):
+            return MicrosoftCalendarProvider(microsoft["access_token"])
     return MockCalendarProvider()
 
 
-def get_slack() -> MockSlackProvider:
+async def get_slack(db=None, workspace_id: str | None = None):
+    if db is not None and workspace_id:
+        from app.services.integrations.oauth_providers import SlackProvider, load_tokens
+
+        tokens = await load_tokens(db, workspace_id, "slack")
+        if tokens and tokens.get("access_token"):
+            return SlackProvider(tokens["access_token"])
     return MockSlackProvider()

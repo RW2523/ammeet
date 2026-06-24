@@ -25,8 +25,10 @@ AmMeeting is a context-aware meeting intelligence platform. It:
 | Backend | FastAPI, Pydantic v2, SQLAlchemy 2.0 async, asyncpg |
 | Database | PostgreSQL 16 + pgvector |
 | Cache/Pubsub | Redis 7 |
-| AI | OpenAI (real) or Anthropic via env key; Jira/Calendar/Slack/STT are stubs |
-| Auth | JWT (access + refresh), TOTP MFA for admins |
+| AI | OpenAI (real) or Anthropic via env key; Whisper/AssemblyAI STT; OpenAI TTS; Recall.ai bot |
+| Integrations | Google Calendar / Slack / Jira via real OAuth (mock fallback without credentials) |
+| Billing | Stripe subscriptions (Free/Pro/Team) with per-plan monthly usage limits; mock mode without keys |
+| Auth | JWT (access + refresh), TOTP MFA, email verification, password reset, rate limiting + lockout |
 
 ---
 
@@ -133,10 +135,38 @@ Full interactive docs at `/docs` (Swagger) or `/redoc`.
 
 ---
 
+## Billing & Plans
+
+| Plan | Price | Proxy sessions | AI question batches | Reports |
+|---|---|---|---|---|
+| Free | $0 | 3/mo | 10/mo | 10/mo |
+| Pro | $29/mo | 50/mo | 200/mo | 200/mo |
+| Team | $99/mo | Unlimited | Unlimited | Unlimited |
+
+- With `STRIPE_SECRET_KEY` set: real Stripe Checkout, customer portal, and webhook-driven plan sync (`/api/billing/webhook`)
+- Without Stripe keys: mock billing — plan changes apply instantly so the full flow is demoable
+- Limits enforced server-side with monthly usage counters (`usage_records` table); 402 returned when exceeded
+
+## Integrations (real OAuth)
+
+Set client credentials in `.env` to switch a provider from mock fixtures to real OAuth:
+
+| Provider | Env vars | What it does |
+|---|---|---|
+| Google Calendar | `GOOGLE_CLIENT_ID/SECRET` | Imports upcoming events + attendees into prep briefs |
+| Slack | `SLACK_CLIENT_ID/SECRET` | Sends report drafts to channels (after your review) |
+| Jira | `JIRA_CLIENT_ID/SECRET` | Pulls open tickets/blockers into meeting context |
+
+Tokens are encrypted at rest (Fernet) and auto-refreshed. Callback URL pattern:
+`{WEBHOOK_BASE_URL}/api/integrations/oauth/{provider}/callback`
+
 ## Security & Privacy
 
 - JWT auth, RBAC (owner/admin/manager/member/viewer/guest) per workspace
 - TOTP MFA for admin-role users
+- Email verification + password reset flows (console email in dev, SMTP in production)
+- Password policy (length + complexity), per-IP rate limiting on auth endpoints, account lockout after repeated failures
+- Integration OAuth tokens encrypted at rest with Fernet (`TOKEN_ENCRYPTION_KEY`)
 - Tenant isolation: every query scoped by workspace; RAG cannot cross workspaces
 - Audit log on: upload, recording start, proxy enable, question approval, AI questions asked, integration changes, transcript views, deletes, exports
 - Capture levels 1-2 only (summary / transcript+summary), no video storage
@@ -220,5 +250,6 @@ ammeet/
 | 1 - Prep & Shadow | ✅ Built | Upload, generate questions, shadow mode, reports |
 | 2 - Live Navigator | ✅ Built | SSE live board, answer tracking, escalation |
 | 3 - Proxy Attender | ✅ Built | Disclosure, KB-grounded proxy, escalation, report |
-| 4 - Real Integrations | Stubbed | Jira/Google/Slack/Zoom OAuth, real STT |
-| 5 - Marketplace | Planned | Google Workspace, Zoom App, Teams App |
+| 4 - Real Integrations | ✅ Built | Google Calendar/Slack/Jira OAuth, real STT/TTS, Recall.ai bot |
+| 5 - Go-to-market | ✅ Built | Landing page, onboarding, Stripe billing, plan limits, email verification, CI |
+| 6 - Marketplace | Planned | Google Workspace, Zoom App, Teams App |

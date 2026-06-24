@@ -36,6 +36,17 @@ async def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
+    # Credential epoch: tokens minted before the last password reset are rejected.
+    if payload.get("tv", 0) != user.token_version:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired; please sign in again")
+
+    return user
+
+
+async def require_superuser(user: User = Depends(get_current_user)) -> User:
+    """Gate instance-wide admin actions (e.g. global LLM config) on the superuser flag."""
+    if not user.is_superuser:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superuser required")
     return user
 
 

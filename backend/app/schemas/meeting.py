@@ -20,6 +20,10 @@ class MeetingCreate(BaseModel):
     mode: MeetingMode = MeetingMode.SHADOW
     capture_level: int = CaptureLevel.TRANSCRIPT_AND_SUMMARY
     scheduled_at: datetime | None = None
+    meeting_url: str | None = None
+    calendar_event_id: str | None = None
+    auto_join_enabled: bool = False
+    proxy_consent_given: bool = False
 
 
 class MeetingUpdate(BaseModel):
@@ -30,6 +34,9 @@ class MeetingUpdate(BaseModel):
     capture_level: int | None = None
     scheduled_at: datetime | None = None
     proxy_consent_given: bool | None = None
+    meeting_url: str | None = None
+    calendar_event_id: str | None = None
+    auto_join_enabled: bool | None = None
 
 
 class MeetingOut(BaseModel):
@@ -45,6 +52,9 @@ class MeetingOut(BaseModel):
     ended_at: datetime | None
     proxy_consent_given: bool
     proxy_intro_logged: bool
+    meeting_url: str | None
+    calendar_event_id: str | None
+    auto_join_enabled: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}

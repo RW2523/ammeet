@@ -12,12 +12,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_workspace_role
 from app.models.meeting import Meeting, MeetingMode, MeetingStatus, Question, QuestionStatus, Report
-from app.models.user import AuditLog, User, WorkspaceRole
+from app.models.user import AuditLog, User, Workspace, WorkspaceRole
 from app.schemas.meeting import ReportOut
+from app.services.billing import check_and_increment_usage
 from app.services.proxy_engine import run_proxy_session
 from app.services.report_generator import generate_report, send_slack_draft
 
 router = APIRouter()
+
+
+async def _workspace_or_404(db: AsyncSession, workspace_id: str) -> Workspace:
+    result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
+    workspace = result.scalar_one_or_none()
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return workspace
 
 
 @router.get("/{workspace_id}/meetings/{meeting_id}/reports", response_model=list[ReportOut])
@@ -50,6 +59,9 @@ async def generate_meeting_report(
     meeting = result.scalar_one_or_none()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+
+    workspace = await _workspace_or_404(db, workspace_id)
+    await check_and_increment_usage(db, workspace, "report_generations")
 
     report = await generate_report(db, meeting)
     db.add(AuditLog(
@@ -104,6 +116,19 @@ async def start_proxy_session(
         .order_by(Question.sort_order)
     )
     questions = list(questions_result.scalars().all())
+
+    # A proxy session does real work only if there is at least one proxy-approved
+    # question. Reject (without consuming quota) when there is nothing to ask.
+    approved = [q for q in questions if q.proxy_allowed and not q.do_not_ask]
+    if not approved:
+        raise HTTPException(
+            status_code=400,
+            detail="No proxy-approved questions to ask. Approve at least one question for the proxy, or attend in person.",
+        )
+
+    # Charge the workspace only once we know the session will actually run.
+    workspace = await _workspace_or_404(db, workspace_id)
+    await check_and_increment_usage(db, workspace, "proxy_sessions")
 
     db.add(AuditLog(
         workspace_id=workspace_id,
