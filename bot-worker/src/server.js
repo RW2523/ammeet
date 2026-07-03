@@ -8,6 +8,11 @@ app.use(express.json({ limit: "20mb" }));
 const bots = new Map();
 const PORT = process.env.PORT || 4500;
 
+// Evict a dead bot after a grace period so its error status stays pollable briefly.
+function scheduleEvict(id, ms = 5 * 60 * 1000) {
+  setTimeout(() => bots.delete(id), ms).unref?.();
+}
+
 app.get("/health", (_req, res) => res.json({ status: "ok", bots: bots.size }));
 
 // Create + deploy a bot into a meeting (mirrors the Recall.ai create-bot contract).
@@ -17,12 +22,18 @@ app.post("/bots", async (req, res) => {
   const id = randomUUID();
   const bot = new BrowserBot(id, { meetingUrl: meeting_url, displayName: display_name, webhookUrl: webhook_url });
   bots.set(id, bot);
-  // Fire-and-forget the join; status is polled via GET /bots/:id
-  bot.start().catch((e) => {
-    bot.status = "error";
-    bot.lastError = String(e).slice(0, 300);
-    console.error(`[bot ${id}] start failed:`, e);
-  });
+  // Fire-and-forget the join; status is polled via GET /bots/:id. start() cleans up
+  // its own Chromium on failure; we keep the entry briefly so the poller can read the
+  // error status, then evict it so the map can't grow unbounded.
+  bot.start()
+    .then((ok) => { if (!ok) scheduleEvict(id); })
+    .catch(async (e) => {
+      bot.status = "error";
+      bot.lastError = String(e).slice(0, 300);
+      console.error(`[bot ${id}] start failed:`, e);
+      try { await bot._cleanup(); } catch {}
+      scheduleEvict(id);
+    });
   res.status(201).json({ id, status: "joining", platform: bot.platform });
 });
 

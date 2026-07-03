@@ -13,6 +13,7 @@ Live session router:
 import asyncio
 import json
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -31,12 +32,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.core.deps import get_current_user, require_workspace_role
 from app.core.redis import get_redis
+from app.core.security import decode_token, webhook_secret
 from app.models.meeting import Meeting, MeetingMode, MeetingStatus, Question, QuestionStatus
 from app.models.meeting_bot import BotStatus, MeetingBot
-from app.models.user import AuditLog, User, WorkspaceRole
+from app.models.user import AuditLog, User, WorkspaceMember, WorkspaceRole
 from app.services.live_proxy import (
     get_active_session,
     launch_session,
@@ -91,13 +93,39 @@ _manager = ConnectionManager()
 # ── WebSocket endpoint ─────────────────────────────────────────────────────
 
 @router.websocket("/ws/meetings/{meeting_id}")
-async def meeting_websocket(meeting_id: str, websocket: WebSocket) -> None:
+async def meeting_websocket(meeting_id: str, websocket: WebSocket, token: str = "") -> None:
     """
     Real-time WebSocket endpoint.
     Clients connect here and receive all proxy / transcript / bot events.
-    Also bridges Redis pub/sub so events published from background tasks
-    reach all connected browsers.
+    Requires ?token=<access JWT>; the user must be a member of the meeting's workspace.
     """
+    # Authenticate BEFORE accepting the socket (native WS can't send headers, so the
+    # access token is passed as a query param).
+    user_id: str | None = None
+    try:
+        payload = decode_token(token)
+        if payload.get("type") == "access":
+            user_id = payload.get("sub")
+    except Exception:
+        user_id = None
+    if not user_id:
+        await websocket.close(code=4401)  # unauthorized
+        return
+    async with AsyncSessionLocal() as db:
+        meeting = (await db.execute(select(Meeting).where(Meeting.id == meeting_id))).scalar_one_or_none()
+        if not meeting:
+            await websocket.close(code=4404)
+            return
+        member = (await db.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == meeting.workspace_id,
+                WorkspaceMember.user_id == user_id,
+            )
+        )).scalar_one_or_none()
+        if not member:
+            await websocket.close(code=4403)  # forbidden
+            return
+
     await _manager.connect(meeting_id, websocket)
 
     # Subscribe to Redis channel for this meeting
@@ -154,13 +182,17 @@ async def meeting_websocket(meeting_id: str, websocket: WebSocket) -> None:
 async def recall_webhook(
     meeting_id: str,
     payload: dict[str, Any],
+    token: str = "",
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """
-    Receive real-time events from Recall.ai.
-    Recall.ai sends POSTs for: bot.joining_call, bot.in_call_recording,
-    transcript.partial, transcript.final, bot.call_ended, etc.
+    Receive real-time events from the bot-worker / Recall.ai.
+    Requires ?token=<bot_webhook_secret> so nobody can inject fake transcript into a
+    live proxy session.
     """
+    if not secrets.compare_digest(token, webhook_secret()):
+        return Response(status_code=401)
+
     event = payload.get("event", "")
     data = payload.get("data", {})
 
@@ -259,14 +291,14 @@ async def join_meeting(
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
+    # Authorize BEFORE leaking consent state to non-members.
+    await require_workspace_role(workspace_id, current_user, db, WorkspaceRole.MEMBER)
+
     if not meeting.proxy_consent_given:
         raise HTTPException(
             status_code=400,
             detail="Proxy consent must be given before joining on behalf of user",
         )
-
-    # Check RBAC
-    await require_workspace_role(workspace_id, current_user, db, WorkspaceRole.MEMBER)
 
     # Check for existing active bot
     existing = await db.execute(

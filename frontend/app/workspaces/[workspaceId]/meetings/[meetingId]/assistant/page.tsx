@@ -55,6 +55,14 @@ export default function AssistantPage() {
     if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
   }, [events]);
 
+  // Close the socket + stop audio when navigating away mid-session (prevents leaks).
+  useEffect(() => () => {
+    wsRef.current?.close();
+    wsRef.current = null;
+    playing.current = false;
+    audioQueue.current = [];
+  }, []);
+
   const playNext = () => {
     if (playing.current || audioQueue.current.length === 0) return;
     const next = audioQueue.current.shift()!;
@@ -67,7 +75,8 @@ export default function AssistantPage() {
 
   const connectWs = () => {
     const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const ws = new WebSocket(apiBase.replace(/^http/, "ws") + `/api/ws/meetings/${meetingId}`);
+    const token = localStorage.getItem("access_token") ?? "";
+    const ws = new WebSocket(apiBase.replace(/^http/, "ws") + `/api/ws/meetings/${meetingId}?token=${token}`);
     wsRef.current = ws;
     ws.onmessage = (e) => {
       try {

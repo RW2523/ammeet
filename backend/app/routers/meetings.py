@@ -7,7 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.core.deps import get_current_user, require_workspace_role
 from app.models.meeting import (
     ActionItem,
@@ -234,40 +234,44 @@ async def upload_context(
         detail=file.filename,
     ))
 
-    background_tasks.add_task(_process_context_source, source.id, db)
+    # Pass only the id — the background task opens its OWN session, because the
+    # request-scoped `db` is already closed by the time BackgroundTasks runs.
+    background_tasks.add_task(_process_context_source, source.id)
 
     return {"id": source.id, "status": "processing", "filename": file.filename}
 
 
-async def _process_context_source(source_id: str, db: AsyncSession) -> None:
-    """Background task: extract and embed context source."""
-    result = await db.execute(select(ContextSource).where(ContextSource.id == source_id))
-    source = result.scalar_one_or_none()
-    if not source or not source.raw_text:
-        return
+async def _process_context_source(source_id: str) -> None:
+    """Background task: extract and embed a context source (own DB session)."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(ContextSource).where(ContextSource.id == source_id))
+        source = result.scalar_one_or_none()
+        if not source or not source.raw_text:
+            return
 
-    source.extraction_status = "processing"
-    await db.flush()
+        source.extraction_status = "processing"
+        await db.flush()
 
-    try:
-        extracted = await extract_from_text(source.raw_text)
-        source.extracted_json = json.dumps(extracted)
-        source.extraction_status = "done"
+        try:
+            extracted = await extract_from_text(source.raw_text)
+            source.extracted_json = json.dumps(extracted)
+            source.extraction_status = "done"
 
-        # Embed into knowledge base
-        chunks = await chunk_text(source.raw_text)
-        await store_chunks(
-            db,
-            workspace_id=source.workspace_id,
-            chunks=chunks,
-            source_type="transcript",
-            meeting_id=source.meeting_id,
-            source_id=source.id,
-        )
-        await db.commit()
-    except Exception as exc:
-        source.extraction_status = "failed"
-        await db.commit()
+            # Embed into knowledge base
+            chunks = await chunk_text(source.raw_text)
+            await store_chunks(
+                db,
+                workspace_id=source.workspace_id,
+                chunks=chunks,
+                source_type="transcript",
+                meeting_id=source.meeting_id,
+                source_id=source.id,
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            source.extraction_status = "failed"
+            await db.commit()
 
 
 @router.get("/{workspace_id}/meetings/{meeting_id}/prep-brief", response_model=PrepBriefOut)

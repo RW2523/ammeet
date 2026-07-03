@@ -61,19 +61,35 @@ function extractSegments(): CaptionSegment[] {
 
 let _timer: ReturnType<typeof setInterval> | null = null;
 const _seen = new Set<string>();
+// Per-speaker in-flight caption: captions grow word-by-word, so hold the latest text
+// and only emit once it stops changing — otherwise every growing prefix ("Hi",
+// "Hi there", "Hi there team") would be emitted as a separate, fragmented line.
+const _pending = new Map<string, string>();
 
 export function startCaptionCapture(onSegment: (s: CaptionSegment) => void) {
   if (_timer) return;
   _seen.clear();
+  _pending.clear();
   _timer = setInterval(() => {
+    // Longest text per speaker this cycle (the caption row's current full content).
+    const current = new Map<string, string>();
     for (const seg of extractSegments()) {
-      const key = `${seg.speaker}|${seg.text}`.slice(0, 160);
-      if (_seen.has(key)) continue;
-      // Only emit once a line looks "settled" (avoid partials by requiring the same
-      // tail twice). Simple: mark seen and emit; dedup handles repeats.
-      _seen.add(key);
-      if (_seen.size > 500) _seen.clear();
-      if (seg.text.trim().length >= 2) onSegment(seg);
+      const prev = current.get(seg.speaker);
+      if (!prev || seg.text.length > prev.length) current.set(seg.speaker, seg.text);
+    }
+    for (const [speaker, text] of current) {
+      if (_pending.get(speaker) === text) {
+        // Unchanged since last poll → the utterance has settled; emit once.
+        const key = `${speaker}|${text}`.slice(0, 200);
+        if (!_seen.has(key) && text.trim().length >= 2) {
+          _seen.add(key);
+          if (_seen.size > 800) _seen.clear();
+          onSegment({ speaker, text });
+        }
+        _pending.delete(speaker);
+      } else {
+        _pending.set(speaker, text);
+      }
     }
   }, 1500);
 }
@@ -83,6 +99,7 @@ export function stopCaptionCapture() {
     clearInterval(_timer);
     _timer = null;
   }
+  _pending.clear();
 }
 
 export function captionsLikelyAvailable(): boolean {

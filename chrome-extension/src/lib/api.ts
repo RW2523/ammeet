@@ -193,10 +193,11 @@ export class ApiClient {
     return resp.arrayBuffer();
   }
 
-  /** Build the WebSocket URL for a meeting's real-time event stream. */
+  /** Build the WebSocket URL for a meeting's real-time event stream (auth via token query param). */
   getWebSocketUrl(meetingId: string): string {
     const base = this.baseUrl.replace(/^http/, "ws");
-    return `${base}/api/ws/meetings/${meetingId}`;
+    const token = this.accessToken ? `?token=${this.accessToken}` : "";
+    return `${base}/api/ws/meetings/${meetingId}${token}`;
   }
 }
 

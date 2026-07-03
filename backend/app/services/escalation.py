@@ -54,7 +54,13 @@ async def classify_escalation(text: str) -> dict[str, Any]:
         return result
     except Exception as exc:
         _logger.warning("Escalation classification LLM call failed: %s", exc)
-        return {"requires_escalation": False, "reason": None, "confidence": 0.5}
+        # FAIL CLOSED: if the safety classifier is unavailable we cannot rule out a
+        # restricted topic, so route to a human rather than let the AI proceed.
+        return {
+            "requires_escalation": True,
+            "reason": "Safety classifier unavailable — defaulting to human review",
+            "confidence": 0.0,
+        }
 
 
 def is_restricted_topic(text: str) -> bool:
