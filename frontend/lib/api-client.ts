@@ -244,6 +244,11 @@ export const liveSessionApi = {
       .then((r) => r.data);
   },
 
-  synthesizeSpeech: (workspaceId: string, text: string): string =>
-    `${process.env.NEXT_PUBLIC_API_URL}/api/workspaces/${workspaceId}/tts`,
+  // Real authenticated TTS: POST the text, get an MP3 blob back as an object URL.
+  synthesizeSpeech: async (workspaceId: string, text: string): Promise<string> => {
+    const res = await api.post(`/workspaces/${workspaceId}/tts`, { text, voice: "nova" }, {
+      responseType: "blob",
+    });
+    return URL.createObjectURL(res.data as Blob);
+  },
 };

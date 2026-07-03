@@ -155,7 +155,11 @@ class MeetingAssistantAgent:
             from app.core.config import get_settings
 
             settings = get_settings()
-            webhook_url = f"{settings.webhook_base_url}/api/webhooks/recall/{meeting_id}"
+            from app.core.security import webhook_secret
+            webhook_url = (
+                f"{settings.webhook_base_url}/api/webhooks/recall/{meeting_id}"
+                f"?token={webhook_secret()}"
+            )
             yield {"type": "bot_status", "status": "creating", "text": "Deploying meeting assistant bot…"}
             self._bot_info = await self._bot_provider.create_bot(
                 meeting_url=self._meeting_url, bot_name=self._name, webhook_url=webhook_url

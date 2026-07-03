@@ -132,6 +132,14 @@ def decrypt_secret(ciphertext: str) -> str:
         raise ValueError("Cannot decrypt stored token (encryption key changed?)") from exc
 
 
+def webhook_secret() -> str:
+    """Shared secret the transcript webhook requires. Derived from secret_key when
+    unset, so the endpoint is never unauthenticated by default."""
+    if _settings.bot_webhook_secret:
+        return _settings.bot_webhook_secret
+    return hashlib.sha256((_settings.secret_key + ":bot-webhook").encode()).hexdigest()
+
+
 def generate_totp_secret() -> str:
     return pyotp.random_base32()
 

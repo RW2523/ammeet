@@ -77,13 +77,19 @@ export function Sidebar() {
                 </p>
               </div>
             </div>
-            {workspaceNavItems(current.id).map((item) => (
+            {workspaceNavItems(current.id).map((item) => {
+              const rootHref = `/workspaces/${current.id}`;
+              // "Overview" (root) matches exactly; other items match their subtree.
+              const active = item.href === rootHref
+                ? pathname === rootHref
+                : pathname === item.href || pathname.startsWith(item.href + "/");
+              return (
               <Link
                 key={item.href}
                 href={item.href}
                 className={cn(
                   "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors",
-                  pathname.startsWith(item.href) && pathname === item.href
+                  active
                     ? "bg-slate-700 text-white"
                     : "text-slate-400 hover:text-white hover:bg-slate-800"
                 )}
@@ -91,7 +97,8 @@ export function Sidebar() {
                 <item.icon className="h-4 w-4 flex-shrink-0" />
                 {item.label}
               </Link>
-            ))}
+              );
+            })}
           </>
         )}
       </nav>

@@ -141,7 +141,11 @@ class LiveProxySession:
             yield {"type": "bot_status", "status": "creating", "text": "Deploying meeting bot…"}
             from app.core.config import get_settings
             settings = get_settings()
-            webhook_url = f"{settings.webhook_base_url}/api/webhooks/recall/{meeting_id}"
+            from app.core.security import webhook_secret
+            webhook_url = (
+                f"{settings.webhook_base_url}/api/webhooks/recall/{meeting_id}"
+                f"?token={webhook_secret()}"
+            )
 
             self._bot_info = await self._bot_provider.create_bot(
                 meeting_url=self._meeting_url,
@@ -213,6 +217,17 @@ class LiveProxySession:
 
             # ── Wait for / collect answer ─────────────────────────────
             answer_text, speaker = await self._wait_for_answer(question.text, timeout=60)
+
+            # No answer in the window (live mode) — record the truth, don't invent one.
+            if not answer_text.strip():
+                question.status = QuestionStatus.SKIPPED
+                await self._db.flush()
+                yield {
+                    "type": "info",
+                    "question_id": question.id,
+                    "text": "No answer captured for this question — flagged for human follow-up.",
+                }
+                continue
 
             # ── Escalation check on answer ────────────────────────────
             esc = await classify_escalation(answer_text)
@@ -330,9 +345,9 @@ class LiveProxySession:
             text = " ".join(s.text for s in collected)
             return text, collected[-1].speaker
 
-        # Fallback: simulate
-        answer = await self._simulate_answer(question_text)
-        return answer, "Participant (simulated)"
+        # No one answered within the window. NEVER fabricate a participant reply in a
+        # live meeting — record the truth so the human can follow up.
+        return "", ""
 
     async def _check_answer_match(self, question: str, transcript: str) -> dict[str, Any]:
         try:
@@ -341,7 +356,9 @@ class LiveProxySession:
                 user=f"Question asked: {question}\n\nRecent transcript:\n{transcript[:2000]}",
             )
         except Exception:
-            return {"answered": True, "answer_text": transcript, "speaker": "Participant", "confidence": 0.5}
+            # Classifier unavailable — do NOT claim the question was answered; keep
+            # collecting until the window closes and let the raw transcript speak.
+            return {"answered": False, "answer_text": None, "speaker": None, "confidence": 0.0}
 
     async def _simulate_answer(self, question_text: str) -> str:
         """LLM-generated simulated answer for demo/test runs."""

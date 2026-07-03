@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     browser_bot_worker_url: str = "http://localhost:4500"
     # Webhook URL Recall.ai will POST transcripts to (must be publicly reachable)
     webhook_base_url: str = "http://localhost:8000"
+    # Shared secret the bot-worker / Recall must present on the transcript webhook.
+    # Empty -> derived from secret_key so it's never unauthenticated by default.
+    bot_webhook_secret: str = ""
 
     # Frontend base URL — used in OAuth redirects and email links
     frontend_url: str = "http://localhost:3000"

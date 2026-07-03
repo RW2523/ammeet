@@ -123,17 +123,30 @@ export default function MeetingPage() {
     setActiveTab("proxy");
 
     const token = localStorage.getItem("access_token");
+    if (!token) {
+      toast.error("Your session expired. Please sign in again.");
+      setProxyRunning(false);
+      return;
+    }
     const url = `${BASE_URL}/api/workspaces/${workspaceId}/meetings/${meetingId}/proxy/start?simulate=true`;
 
-    const es = new EventSource(`${url}&token=${token}`);
-    // Note: EventSource doesn't support custom headers, use fetch with ReadableStream for production
-    // For demo we use the simpler approach with token in query string
+    // Streamed SSE over fetch (EventSource can't send the auth header).
     fetch(url, {
+      method: "POST",
       headers: { Authorization: `Bearer ${token}` },
     }).then(async (res) => {
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        toast.error(detail?.detail || `Couldn't start the proxy (${res.status}).`);
+        setProxyRunning(false);
+        return;
+      }
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
-      if (!reader) return;
+      if (!reader) {
+        setProxyRunning(false);
+        return;
+      }
       let buf = "";
       while (true) {
         const { done, value } = await reader.read();

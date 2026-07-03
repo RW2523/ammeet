@@ -50,7 +50,8 @@ export default function TestJoinPage() {
 
   const connectWs = (mid: string) => {
     wsRef.current?.close();
-    const ws = new WebSocket(`${BASE_URL.replace(/^http/, "ws")}/api/ws/meetings/${mid}`);
+    const token = localStorage.getItem("access_token") ?? "";
+    const ws = new WebSocket(`${BASE_URL.replace(/^http/, "ws")}/api/ws/meetings/${mid}?token=${token}`);
     wsRef.current = ws;
     ws.onopen = () => addEvent("info", "Live channel connected — waiting for the bot…");
     ws.onmessage = (ev) => {

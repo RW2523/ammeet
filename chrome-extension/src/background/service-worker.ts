@@ -154,16 +154,18 @@ async function handleMessage(
 
     // ── Meeting detected by content script ──────────────────────────────────
     case "MEETING_DETECTED": {
-      const dm: DetectedMeeting = msg.meeting;
+      // The content script can't see its own tab id, so it sends -1 — fill it here
+      // from the message sender. Without this, notetaker capture can't target the tab.
+      const dm: DetectedMeeting = { ...msg.meeting, tabId: sender.tab?.id ?? msg.meeting.tabId };
       await setStoredState({ detectedMeeting: dm });
 
       // Auto-open side panel in the meeting tab
-      if (dm.tabId) {
+      if (dm.tabId && dm.tabId > 0) {
         chrome.sidePanel.open({ tabId: dm.tabId }).catch(() => {});
       }
 
-      // Notify all other contexts (side panel)
-      broadcastToAll(msg, sender.id);
+      // Notify all other contexts (side panel) with the corrected tabId
+      broadcastToAll({ ...msg, meeting: dm });
 
       // Show notification
       chrome.notifications.create("meeting-detected", {
@@ -179,7 +181,7 @@ async function handleMessage(
 
     case "MEETING_ENDED": {
       await setStoredState({ detectedMeeting: null, botStatus: "idle", sessionStatus: "inactive" });
-      broadcastToAll(msg, sender.id);
+      broadcastToAll(msg);
       return null;
     }
 
@@ -226,10 +228,22 @@ async function handleMessage(
         sessionStatus: "active",
       });
       const state = await getStoredState();
-      const tabId = state.detectedMeeting?.tabId;
-      if (tabId && tabId > 0) {
-        chrome.tabs.sendMessage(tabId, { type: "NOTETAKER_SET_ACTIVE", active: true }).catch(() => {});
+      let tabId = state.detectedMeeting?.tabId;
+      if (!tabId || tabId <= 0) {
+        // Fall back to finding the meeting tab so we don't falsely show "capturing".
+        const tabs = await chrome.tabs.query({
+          url: [
+            "https://*.zoom.us/*", "https://zoom.us/*", "https://meet.google.com/*",
+            "https://teams.microsoft.com/*", "https://*.teams.microsoft.com/*",
+          ],
+        });
+        tabId = tabs[0]?.id;
       }
+      if (!tabId || tabId <= 0) {
+        broadcastToAll({ type: "NOTETAKER_STATE", active: false, lines: 0 });
+        return { type: "ERROR", message: "No meeting tab found. Open the meeting tab, then start the notetaker." };
+      }
+      chrome.tabs.sendMessage(tabId, { type: "NOTETAKER_SET_ACTIVE", active: true }).catch(() => {});
       _ntLines = 0;
       broadcastToAll({ type: "NOTETAKER_STATE", active: true, lines: 0 });
       return { type: "NOTETAKER_STATE", active: true, lines: 0 };
@@ -293,10 +307,19 @@ export function showEscalationNotification(questionText: string) {
 }
 
 // ── Broadcast to all extension contexts ──────────────────────────────────────
-function broadcastToAll(msg: ExtensionMessage, excludeContextId?: string) {
+function broadcastToAll(msg: ExtensionMessage) {
+  // Extension pages (side panel, popup).
   chrome.runtime.sendMessage(msg).catch(() => {
     // No listeners — side panel not open yet, ignore
   });
+  // Content scripts (the injected overlay badge) can't receive runtime.sendMessage
+  // in MV3, so forward to the detected meeting tab explicitly.
+  getStoredState()
+    .then((s) => {
+      const tabId = s.detectedMeeting?.tabId;
+      if (tabId && tabId > 0) chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+    })
+    .catch(() => {});
 }
 
 function platformLabel(p: string): string {

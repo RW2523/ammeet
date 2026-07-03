@@ -122,6 +122,7 @@ async def invite_member(
         action="workspace.member.invited",
         detail=f"{invitee.email} as {body.role}",
     ))
+    await db.flush()  # populate member.id / created_at before response serialization
     return member
 
 

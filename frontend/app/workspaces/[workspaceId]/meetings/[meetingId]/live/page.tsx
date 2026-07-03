@@ -76,6 +76,15 @@ export default function LiveMeetingRoomPage() {
     refetchInterval: sessionActive ? 5000 : false,
   });
 
+  // Reflect the fetched bot status in the UI (so a reload shows the real state).
+  useEffect(() => {
+    if (!botInfo) return;
+    const s = (botInfo as { live_status?: string; status?: string }).live_status
+      ?? (botInfo as { status?: string }).status;
+    if (s) setBotStatus(s);
+    if ((botInfo as { session_active?: boolean }).session_active) setSessionActive(true);
+  }, [botInfo]);
+
   // ── WebSocket setup ───────────────────────────────────────────────────────
   const addEvent = useCallback((event: ProxyEvent) => {
     const id = ++eventIdRef.current;
@@ -126,7 +135,8 @@ export default function LiveMeetingRoomPage() {
     if (!meetingId) return;
 
     const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const wsUrl = apiBase.replace(/^http/, "ws") + `/api/ws/meetings/${meetingId}`;
+    const token = localStorage.getItem("access_token") ?? "";
+    const wsUrl = apiBase.replace(/^http/, "ws") + `/api/ws/meetings/${meetingId}?token=${token}`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
