@@ -252,3 +252,54 @@ export const liveSessionApi = {
     return URL.createObjectURL(res.data as Blob);
   },
 };
+
+// ─── Speak Mode ──────────────────────────────────────────────────────────────
+export interface SpeakPoint {
+  id: string;
+  text: string;
+  stage: string;
+  priority: "must" | "should" | "nice";
+  order_index: number;
+  status: "pending" | "covered" | "missed";
+  covered_by_text?: string | null;
+}
+export interface SpeakResponse {
+  id: string;
+  speaker: string;
+  text: string;
+  kind: string;
+  point_id: string | null;
+}
+export interface SpeakState {
+  points: SpeakPoint[];
+  responses: SpeakResponse[];
+  progress: { total: number; covered: number; missed: number; pending: number; must_remaining: number };
+}
+export interface SpeakSummary {
+  summary: string;
+  covered: string[];
+  missed: string[];
+  action_items: { title: string; owner?: string | null }[];
+  follow_ups: string[];
+  responses: { speaker: string; text: string; kind: string }[];
+}
+
+export const speakApi = {
+  generate: (workspaceId: string, meetingId: string, text: string) =>
+    api
+      .post<SpeakState>(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/points/generate`, { text })
+      .then((r) => r.data),
+  state: (workspaceId: string, meetingId: string) =>
+    api.get<SpeakState>(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/state`).then((r) => r.data),
+  updatePoint: (
+    workspaceId: string,
+    meetingId: string,
+    pointId: string,
+    data: Partial<Pick<SpeakPoint, "text" | "stage" | "priority" | "status">>
+  ) =>
+    api
+      .put<SpeakPoint>(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/points/${pointId}`, data)
+      .then((r) => r.data),
+  finalize: (workspaceId: string, meetingId: string) =>
+    api.post<SpeakSummary>(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/finalize`).then((r) => r.data),
+};

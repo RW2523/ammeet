@@ -76,6 +76,10 @@ export class BrowserSTT {
 
     this.recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       const msg = event.error;
+      // Fatal errors won't self-heal — disable auto-restart to avoid a tight error loop.
+      if (msg === "not-allowed" || msg === "service-not-allowed" || msg === "audio-capture") {
+        this._shouldRestart = false;
+      }
       // "no-speech" is normal — don't treat as critical
       if (msg !== "no-speech") {
         this.onError(msg);
@@ -126,27 +130,78 @@ export class BrowserSTT {
 }
 
 // ─── Tab audio capture via chrome.tabCapture ──────────────────────────────────
-// Captures the meeting tab's output audio (what participants say).
-// This runs in the SIDE PANEL context where chrome.tabCapture is available.
+// Captures the meeting tab's OUTPUT audio — i.e. what the OTHER participants say
+// (your own mic isn't played back to you, so this stream is "them", cleanly separate
+// from your mic which is "you"). Runs in the SIDE PANEL where tabCapture is available.
 
-export async function captureTabAudio(tabId: number): Promise<MediaStream | null> {
+export async function captureTabAudio(): Promise<MediaStream | null> {
   return new Promise((resolve) => {
-    if (!chrome?.tabCapture) {
+    if (!chrome?.tabCapture?.capture) {
       resolve(null);
       return;
     }
-    chrome.tabCapture.capture(
-      { audio: true, video: false },
-      (stream) => {
-        if (chrome.runtime.lastError) {
-          console.error("tabCapture error:", chrome.runtime.lastError);
+    try {
+      chrome.tabCapture.capture({ audio: true, video: false }, (stream) => {
+        if (chrome.runtime.lastError || !stream) {
+          console.warn("tabCapture:", chrome.runtime.lastError?.message ?? "no stream");
           resolve(null);
         } else {
-          resolve(stream ?? null);
+          resolve(stream);
         }
-      }
-    );
+      });
+    } catch (e) {
+      console.warn("tabCapture threw:", e);
+      resolve(null);
+    }
   });
+}
+
+/**
+ * Record a live stream as a sequence of COMPLETE, independently-decodable WebM blobs
+ * (one every `seconds`). MediaRecorder's mid-stream chunks lack headers, so we restart
+ * the recorder each cycle — each blob can then be transcribed on its own.
+ */
+export function startSegmentedRecording(
+  stream: MediaStream,
+  onSegment: (blob: Blob) => void,
+  seconds = 10
+): { stop: () => void } {
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
+  let stopped = false;
+  let recorder: MediaRecorder | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const cycle = () => {
+    if (stopped || !stream.active) return;
+    const chunks: Blob[] = [];
+    recorder = new MediaRecorder(stream, { mimeType: mime });
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+    recorder.onstop = () => {
+      if (chunks.length) onSegment(new Blob(chunks, { type: mime }));
+      if (!stopped) cycle(); // roll straight into the next segment
+    };
+    recorder.start();
+    timer = setTimeout(() => {
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+    }, seconds * 1000);
+  };
+
+  cycle();
+  return {
+    stop: () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      try {
+        if (recorder && recorder.state !== "inactive") recorder.stop();
+      } catch {
+        /* ignore */
+      }
+    },
+  };
 }
 
 /**

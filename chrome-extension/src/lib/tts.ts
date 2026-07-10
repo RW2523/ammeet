@@ -128,25 +128,20 @@ export class BrowserTTS {
     const ctx = this._audioContext;
     if (ctx.state === "suspended") await ctx.resume();
 
-    return new Promise((resolve) => {
-      ctx.decodeAudioData(
-        buffer.slice(0),
-        (decoded) => {
-          const source = ctx.createBufferSource();
-          source.buffer = decoded;
-          source.connect(ctx.destination);
-          this._speaking = true;
-          source.onended = () => {
-            this._speaking = false;
-            resolve();
-          };
-          source.start();
-        },
-        (err) => {
-          console.error("TTS audio decode error:", err);
-          resolve();
-        }
-      );
+    // Use the promise form so a decode failure REJECTS (letting the caller fall back
+    // to speechSynthesis) rather than leaving an unhandled "EncodingError" rejection
+    // from the legacy callback form. Undecodable input = backend sent non-audio.
+    const decoded = await ctx.decodeAudioData(buffer.slice(0));
+    await new Promise<void>((resolve) => {
+      const source = ctx.createBufferSource();
+      source.buffer = decoded;
+      source.connect(ctx.destination);
+      this._speaking = true;
+      source.onended = () => {
+        this._speaking = false;
+        resolve();
+      };
+      source.start();
     });
   }
 

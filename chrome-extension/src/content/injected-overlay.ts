@@ -124,7 +124,14 @@ badge.addEventListener("click", (e) => {
     host.style.display = "none";
     return;
   }
-  chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" } as ExtensionMessage).catch(() => {});
+  // sendMessage throws synchronously if the extension was reloaded — guard it.
+  try {
+    if (!chrome.runtime?.id) return;
+    const p = chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" } as ExtensionMessage);
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch {
+    /* extension context invalidated — ignore */
+  }
 });
 
 // ─── Listen for status updates from service worker / side panel ───────────────

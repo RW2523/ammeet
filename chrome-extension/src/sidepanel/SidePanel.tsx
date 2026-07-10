@@ -18,9 +18,11 @@ import type {
   StoredState,
   BotStatus,
   SessionStatus,
+  SpeakState,
+  SpeakSummary,
 } from "../lib/types";
 import { ApiClient } from "../lib/api";
-import { BrowserSTT } from "../lib/stt";
+import { BrowserSTT, captureTabAudio, startSegmentedRecording } from "../lib/stt";
 import { BrowserTTS } from "../lib/tts";
 import { WSManager } from "../lib/websocket";
 import { getStoredState, getBackendUrl, setBackendUrl as persistBackendUrl, onStorageChange } from "../lib/store";
@@ -260,10 +262,11 @@ function LoginScreen({
 
 // ─── Main Side Panel ──────────────────────────────────────────────────────────
 
-type Tab = "session" | "notetaker" | "transcript" | "questions" | "settings";
+type Tab = "session" | "speak" | "notetaker" | "transcript" | "questions" | "settings";
 
 const TAB_LABELS: Record<Tab, string> = {
   session: "🚀 Session",
+  speak: "🎤 Speak",
   notetaker: "📝 Notes",
   transcript: "💬 Transcript",
   questions: "❓ Questions",
@@ -307,6 +310,22 @@ export default function SidePanel() {
   const [recording, setRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
+
+  // ── Participants' audio (tab capture → backend STT) — "them", separate from mic ──
+  const [participantCapture, setParticipantCapture] = useState(false);
+  const tabStreamRef = useRef<MediaStream | null>(null);
+  const tabRecorderRef = useRef<{ stop: () => void } | null>(null);
+  const tabAudioCtxRef = useRef<AudioContext | null>(null);
+  const lastParticipantTextRef = useRef<string>("");
+
+  // ── Speak Mode (silent speaking companion) ─────────────────────────────────
+  const [speakState, setSpeakState] = useState<SpeakState | null>(null);
+  const [speakInput, setSpeakInput] = useState("");
+  const [speakActive, setSpeakActive] = useState(false);
+  const [speakSummary, setSpeakSummary] = useState<SpeakSummary | null>(null);
+  const [speakBusy, setSpeakBusy] = useState(false);
+  const speakSentIdxRef = useRef(0);
+  const transcriptRef = useRef<TranscriptLine[]>([]);
 
   // ── Notetaker (bot-free, captures captions from this tab) ─────────────────
   const [notetakerActive, setNotetakerActive] = useState(false);
@@ -362,6 +381,10 @@ export default function SidePanel() {
       chrome.runtime.onMessage.removeListener(msgListener);
       sttRef.current?.stop();
       wsRef.current?.disconnect();
+      // Stop participant tab-capture + its audio routing.
+      tabRecorderRef.current?.stop();
+      tabStreamRef.current?.getTracks().forEach((t) => t.stop());
+      tabAudioCtxRef.current?.close().catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -382,9 +405,16 @@ export default function SidePanel() {
     };
 
     stt.onError = (err) => {
-      if (err !== "no-speech") {
-        addEvent({ type: "error", text: `STT: ${err}` });
-      }
+      // "no-speech"/"aborted" are normal lulls — ignore. Map the rest to guidance.
+      if (err === "no-speech" || err === "aborted") return;
+      const friendly: Record<string, string> = {
+        "not-allowed": "Microphone permission denied — allow mic access for the extension and retry.",
+        "service-not-allowed": "Speech recognition is blocked by the browser/OS settings.",
+        network: "Speech recognition needs an internet connection.",
+        "audio-capture": "No microphone detected — check your input device.",
+      };
+      addEvent({ type: "error", text: `STT: ${friendly[err] ?? err}` });
+      setSttActive(false);
     };
   }, []);
 
@@ -392,6 +422,35 @@ export default function SidePanel() {
   useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [events]);
+
+  // Keep a live ref of the transcript for the Speak batcher (avoids resetting its timer).
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
+
+  // Speak Mode: every few seconds, send new transcript lines to the coverage matcher.
+  useEffect(() => {
+    if (!speakActive || !selectedWorkspace || !selectedMeeting || !auth.accessToken) return;
+    const api = new ApiClient(backendUrl, auth.accessToken);
+    const timer = setInterval(async () => {
+      const start = speakSentIdxRef.current;
+      const lines = transcriptRef.current.slice(start);
+      if (lines.length === 0) return;
+      speakSentIdxRef.current = transcriptRef.current.length;
+      try {
+        const st = await api.ingestSpeak(
+          selectedWorkspace,
+          selectedMeeting,
+          lines.map((l) => ({ speaker: l.speaker, text: l.text }))
+        );
+        setSpeakState(st);
+      } catch {
+        /* keep the session going; retry next tick */
+      }
+    }, 4000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speakActive, selectedWorkspace, selectedMeeting, auth.accessToken, backendUrl]);
 
   // Load workspaces when authenticated
   useEffect(() => {
@@ -590,20 +649,32 @@ export default function SidePanel() {
 
   // ── STT controls ───────────────────────────────────────────────────────────
 
-  const toggleSTT = () => {
+  const toggleSTT = async () => {
     const stt = sttRef.current;
     if (!stt) return;
     if (!stt.isSupported) {
-      addEvent({ type: "error", text: "Web Speech API not supported in this browser." });
+      addEvent({ type: "error", text: "Speech-to-text needs Chrome or Edge (Web Speech API not available here)." });
       return;
     }
     if (sttActive) {
       stt.stop();
       setSttActive(false);
-    } else {
-      stt.start();
-      setSttActive(true);
+      return;
     }
+    // The side panel is a chrome-extension:// page — Web Speech throws "not-allowed"
+    // unless the page already holds mic permission, so request it explicitly first.
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s.getTracks().forEach((t) => t.stop());
+    } catch {
+      addEvent({
+        type: "error",
+        text: "Microphone blocked. Click the mic/📷 icon in the address bar, allow access, then retry.",
+      });
+      return;
+    }
+    stt.start();
+    setSttActive(true);
   };
 
   // ── Recording (upload to Whisper) ──────────────────────────────────────────
@@ -646,6 +717,126 @@ export default function SidePanel() {
   const stopRecording = () => {
     mediaRecorderRef.current?.stop();
     setRecording(false);
+  };
+
+  // ── Participants' audio capture (them) ─────────────────────────────────────
+
+  const stopParticipantCapture = () => {
+    tabRecorderRef.current?.stop();
+    tabRecorderRef.current = null;
+    tabStreamRef.current?.getTracks().forEach((t) => t.stop());
+    tabStreamRef.current = null;
+    tabAudioCtxRef.current?.close().catch(() => {});
+    tabAudioCtxRef.current = null;
+    setParticipantCapture(false);
+  };
+
+  const startParticipantCapture = async () => {
+    if (!selectedWorkspace || !selectedMeeting || !auth.accessToken) {
+      addEvent({ type: "error", text: "Pick a workspace & meeting first." });
+      return;
+    }
+    const stream = await captureTabAudio();
+    if (!stream) {
+      addEvent({
+        type: "error",
+        text: "Couldn't capture the meeting tab's audio. Make sure this meeting tab is the active tab, then retry.",
+      });
+      return;
+    }
+    tabStreamRef.current = stream;
+    lastParticipantTextRef.current = "";
+    // Tab capture mutes the tab for you — re-route it to the speakers so you still hear the meeting.
+    try {
+      const ctx = new AudioContext();
+      ctx.createMediaStreamSource(stream).connect(ctx.destination);
+      tabAudioCtxRef.current = ctx;
+    } catch {
+      /* re-routing best-effort */
+    }
+    // Transcribe the participants' side in ~10s segments (separate from your mic).
+    const api = new ApiClient(backendUrl, auth.accessToken);
+    tabRecorderRef.current = startSegmentedRecording(
+      stream,
+      async (blob) => {
+        try {
+          const res = await api.transcribeAudio(selectedWorkspace, selectedMeeting, blob, "participants.webm");
+          const text = res.transcript?.trim();
+          // Skip empties and repeats (e.g. the demo-STT marker, or an unchanged segment).
+          if (text && text !== lastParticipantTextRef.current) {
+            lastParticipantTextRef.current = text;
+            setTranscript((prev) => [
+              ...prev.slice(-200),
+              { speaker: "Participants", text, is_final: true, ts: Date.now() },
+            ]);
+          }
+        } catch (e) {
+          addEvent({ type: "error", text: `Participant transcription failed: ${e}` });
+        }
+      },
+      10
+    );
+    stream.getAudioTracks()[0]?.addEventListener("ended", stopParticipantCapture);
+    setParticipantCapture(true);
+    addEvent({ type: "info", text: "Listening to participants' audio — transcribing every ~10s." });
+  };
+
+  const toggleParticipantCapture = () => {
+    if (participantCapture) stopParticipantCapture();
+    else void startParticipantCapture();
+  };
+
+  // ── Speak Mode controls ────────────────────────────────────────────────────
+
+  const generateSpeak = async () => {
+    if (!selectedWorkspace || !selectedMeeting || !auth.accessToken) {
+      addEvent({ type: "error", text: "Pick a workspace & meeting first." });
+      return;
+    }
+    if (!speakInput.trim()) {
+      addEvent({ type: "error", text: "Paste your notes / agenda first." });
+      return;
+    }
+    setSpeakBusy(true);
+    try {
+      const api = new ApiClient(backendUrl, auth.accessToken);
+      const st = await api.generateSpeakPoints(selectedWorkspace, selectedMeeting, speakInput.trim());
+      setSpeakState(st);
+      setSpeakSummary(null);
+    } catch (e) {
+      addEvent({ type: "error", text: `Speak: couldn't generate points (${e})` });
+    } finally {
+      setSpeakBusy(false);
+    }
+  };
+
+  const startSpeak = () => {
+    if (!speakState || speakState.points.length === 0) {
+      addEvent({ type: "error", text: "Generate your speaking points first." });
+      return;
+    }
+    // Only track speech from now on. Start caption capture (feeds the transcript stream).
+    speakSentIdxRef.current = transcriptRef.current.length;
+    sendSW({ type: "START_NOTETAKER", workspaceId: selectedWorkspace, meetingId: selectedMeeting });
+    setSpeakActive(true);
+    addEvent({ type: "info", text: "Speak Mode on — turn on captions (CC); points tick off as you cover them." });
+  };
+
+  const finishSpeak = async () => {
+    setSpeakActive(false);
+    sendSW({ type: "STOP_NOTETAKER", workspaceId: selectedWorkspace, meetingId: selectedMeeting });
+    if (!selectedWorkspace || !selectedMeeting || !auth.accessToken) return;
+    setSpeakBusy(true);
+    try {
+      const api = new ApiClient(backendUrl, auth.accessToken);
+      const summary = await api.finalizeSpeak(selectedWorkspace, selectedMeeting);
+      setSpeakSummary(summary);
+      setSpeakState(await api.getSpeakState(selectedWorkspace, selectedMeeting));
+    } catch (e) {
+      addEvent({ type: "error", text: `Speak: couldn't finalize (${e})` });
+    } finally {
+      setSpeakBusy(false);
+    }
   };
 
   // ── Logout ─────────────────────────────────────────────────────────────────
@@ -702,7 +893,7 @@ export default function SidePanel() {
 
       {/* Tab bar */}
       <div className="flex border-b border-gray-800 flex-shrink-0 bg-gray-900">
-        {(["session", "notetaker", "transcript", "questions", "settings"] as Tab[]).map((t) => (
+        {(["session", "speak", "notetaker", "transcript", "questions", "settings"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -825,15 +1016,23 @@ export default function SidePanel() {
                 <Btn
                   variant={sttActive ? "red" : "outline"}
                   onClick={toggleSTT}
-                  title={sttActive ? "Stop mic transcription" : "Start mic transcription (Web Speech API)"}
+                  title="Transcribe YOUR microphone in real time (Web Speech API)"
                 >
-                  {sttActive ? "🎙 Stop STT" : "🎙 Start STT"}
+                  {sttActive ? "🎙 You: on" : "🎙 You (mic)"}
+                </Btn>
+
+                <Btn
+                  variant={participantCapture ? "red" : "outline"}
+                  onClick={toggleParticipantCapture}
+                  title="Capture the OTHER participants' audio from this tab and transcribe it (separate from your mic)"
+                >
+                  {participantCapture ? "🎧 Them: on" : "🎧 Participants"}
                 </Btn>
 
                 <Btn
                   variant={recording ? "red" : "outline"}
                   onClick={recording ? stopRecording : startRecording}
-                  title={recording ? "Stop and upload for Whisper transcription" : "Record audio"}
+                  title={recording ? "Stop and upload for Whisper transcription" : "Record your mic and upload"}
                 >
                   {recording ? "⏹ Upload" : "🔴 Record"}
                 </Btn>
@@ -928,6 +1127,136 @@ export default function SidePanel() {
                 </div>
               )}
             </Section>
+          </div>
+        )}
+
+        {/* ── SPEAK TAB (silent speaking companion) ─────────────────────────── */}
+        {tab === "speak" && (
+          <div className="p-3 space-y-3">
+            {!speakState || speakState.points.length === 0 ? (
+              <Section title="🎤 Speak Mode — never miss a point">
+                <p className="text-gray-500 text-[11px] mb-2">
+                  Paste your notes, agenda, sermon outline, or talking points. AmMeeting turns them into a
+                  prioritized checklist and ticks each one off as you say it — live and silent.
+                </p>
+                <textarea
+                  value={speakInput}
+                  onChange={(e) => setSpeakInput(e.target.value)}
+                  rows={6}
+                  placeholder="Paste your notes / agenda / outline here…"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-[12px] text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                />
+                <Btn onClick={generateSpeak} disabled={speakBusy || !speakInput.trim()} variant="green" className="mt-2">
+                  {speakBusy ? "Structuring…" : "✨ Generate speaking points"}
+                </Btn>
+              </Section>
+            ) : (
+              <>
+                <Section title="🎤 Speak Mode">
+                  <div className="mb-2">
+                    <div className="flex items-center justify-between text-[11px] mb-1">
+                      <span className="text-gray-300">
+                        {speakState.progress.covered}/{speakState.progress.total} covered
+                      </span>
+                      {speakState.progress.must_remaining > 0 && (
+                        <span className="text-amber-400">
+                          {speakState.progress.must_remaining} must-have{speakState.progress.must_remaining > 1 ? "s" : ""} left
+                        </span>
+                      )}
+                    </div>
+                    <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-green-500 transition-all"
+                        style={{ width: `${speakState.progress.total ? Math.round((100 * speakState.progress.covered) / speakState.progress.total) : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {!speakActive ? (
+                      <Btn onClick={startSpeak} variant="green" disabled={speakBusy}>● Start</Btn>
+                    ) : (
+                      <Btn onClick={finishSpeak} variant="red" disabled={speakBusy}>■ Finish &amp; summarize</Btn>
+                    )}
+                    {speakActive && <span className="text-green-400 text-[11px] animate-pulse">● tracking</span>}
+                    <Btn
+                      variant="ghost"
+                      onClick={() => { setSpeakState(null); setSpeakInput(""); setSpeakSummary(null); setSpeakActive(false); }}
+                      className="ml-auto"
+                    >
+                      ↺ New
+                    </Btn>
+                  </div>
+                  {speakActive && (
+                    <p className="text-gray-500 text-[10px] mt-1">Turn on captions (CC) in the meeting for best tracking.</p>
+                  )}
+                </Section>
+
+                <Section title="Your points">
+                  <div className="space-y-3">
+                    {Array.from(new Set(speakState.points.map((p) => p.stage))).map((stage) => (
+                      <div key={stage}>
+                        <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">{stage}</p>
+                        <div className="space-y-1">
+                          {speakState.points.filter((p) => p.stage === stage).map((p) => (
+                            <div
+                              key={p.id}
+                              className={clsx(
+                                "flex items-start gap-2 text-[12px] rounded px-2 py-1",
+                                p.status === "covered" && "bg-green-900/20",
+                                p.status === "missed" && "bg-red-900/20",
+                                p.status === "pending" && p.priority === "must" && speakActive && "bg-amber-900/20"
+                              )}
+                            >
+                              <span className="mt-0.5">
+                                {p.status === "covered" ? "✅" : p.status === "missed" ? "❌" : p.priority === "must" ? "🔴" : "•"}
+                              </span>
+                              <span className={clsx("flex-1", p.status === "covered" && "line-through text-gray-500", p.status === "missed" && "text-red-300")}>
+                                {p.text}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+
+                {speakState.responses.length > 0 && (
+                  <Section title={`Audience (${speakState.responses.length})`}>
+                    <div className="space-y-1 max-h-40 overflow-y-auto">
+                      {speakState.responses.map((r) => (
+                        <p key={r.id} className="text-[11px] text-gray-300">
+                          <span className={clsx("mr-1", r.kind === "question" ? "text-yellow-400" : r.kind === "decision" ? "text-purple-400" : "text-gray-500")}>
+                            {r.kind === "question" ? "❓" : r.kind === "decision" ? "🔷" : "💬"}
+                          </span>
+                          <span className="text-gray-500">{r.speaker}:</span> {r.text}
+                        </p>
+                      ))}
+                    </div>
+                  </Section>
+                )}
+
+                {speakSummary && (
+                  <Section title="Session summary">
+                    <p className="text-[12px] text-gray-200 mb-2">{speakSummary.summary}</p>
+                    {!!speakSummary.missed.length && (
+                      <div className="mb-2">
+                        <p className="text-gray-500 text-[11px] font-semibold">Missed points</p>
+                        {speakSummary.missed.map((m, i) => <p key={i} className="text-red-300 text-[11px]">— {m}</p>)}
+                      </div>
+                    )}
+                    {!!speakSummary.action_items.length && (
+                      <div>
+                        <p className="text-gray-500 text-[11px] font-semibold">Action items</p>
+                        {speakSummary.action_items.map((a, i) => (
+                          <p key={i} className="text-gray-300 text-[11px]">• {a.title}{a.owner ? ` — ${a.owner}` : ""}</p>
+                        ))}
+                      </div>
+                    )}
+                  </Section>
+                )}
+              </>
+            )}
           </div>
         )}
 
