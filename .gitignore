@@ -54,3 +54,6 @@ redisdata/
 bot-worker/profile/
 bot-worker/recordings/*
 !bot-worker/recordings/.gitkeep
+
+# Chrome extension build artifacts
+chrome-extension/ammeet-extension.zip

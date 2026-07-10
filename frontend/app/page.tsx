@@ -5,9 +5,15 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Bot, Brain, CheckCircle, FileText, MessageSquare, Shield, Sparkles, Zap } from "lucide-react";
+import { Bot, Brain, CheckCircle, FileText, MessageSquare, Mic, Shield, Sparkles, Zap } from "lucide-react";
 
 const FEATURES = [
+  {
+    icon: Mic,
+    title: "Speak Mode — cover every point",
+    desc: "Load your agenda, outline, or talking points and it becomes a live checklist that ticks itself off as you speak. Missed must-haves stay highlighted — never lose your thread again.",
+    color: "text-green-400",
+  },
   {
     icon: Brain,
     title: "Knows what to ask",
@@ -51,7 +57,7 @@ const PLANS = [
     name: "Free",
     price: "$0",
     desc: "Try the full workflow",
-    features: ["3 proxy sessions / month", "10 AI question batches / month", "10 reports / month", "Knowledge base search"],
+    features: ["5 Speak sessions / month", "3 proxy sessions / month", "10 reports / month", "Knowledge base search"],
     cta: "Start free",
     highlight: false,
   },
@@ -59,7 +65,7 @@ const PLANS = [
     name: "Pro",
     price: "$29",
     desc: "For people who live in meetings",
-    features: ["50 proxy sessions / month", "200 AI question batches / month", "200 reports / month", "Calendar, Slack & Jira integrations"],
+    features: ["200 Speak sessions / month", "50 proxy sessions / month", "200 reports / month", "Calendar, Slack & Jira integrations"],
     cta: "Start with Pro",
     highlight: true,
   },
@@ -111,17 +117,18 @@ export default function LandingPage() {
 
       {/* Hero */}
       <section className="max-w-4xl mx-auto text-center px-6 pt-20 pb-16">
-        <Badge className="bg-blue-900/60 text-blue-300 mb-6 inline-flex items-center gap-1">
-          <Sparkles className="h-3 w-3" /> The transparent AI proxy attender
+        <Badge className="bg-green-900/60 text-green-300 mb-6 inline-flex items-center gap-1">
+          <Sparkles className="h-3 w-3" /> Your silent speaking companion
         </Badge>
         <h1 className="text-5xl md:text-6xl font-bold leading-tight">
-          Send AI to your next meeting.
-          <span className="block text-blue-400">It knows what to ask.</span>
+          Never miss a point again.
+          <span className="block text-green-400">Your notes, ticking off as you speak.</span>
         </h1>
         <p className="text-slate-400 text-lg mt-6 max-w-2xl mx-auto">
-          AmMeeting preps your questions, attends with full disclosure, collects the answers,
-          escalates anything sensitive to you, and delivers the report — so work keeps moving
-          even when you can&apos;t be there.
+          Load your agenda, sermon, pitch, or interview questions. AmMeeting listens silently in the
+          background and checks off each point the moment you say it — highlighting anything you still
+          need to cover. It takes the notes and captures every answer, so you leave every session with
+          organized outcomes and nothing forgotten.
         </p>
         <div className="flex items-center justify-center gap-4 mt-8">
           <Link href="/auth/register">

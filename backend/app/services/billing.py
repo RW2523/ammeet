@@ -29,16 +29,19 @@ PLAN_LIMITS: dict[str, dict[str, int | None]] = {
         "proxy_sessions": 3,
         "ai_question_batches": 10,
         "report_generations": 10,
+        "speak_sessions": 5,
     },
     SubscriptionPlan.PRO: {
         "proxy_sessions": 50,
         "ai_question_batches": 200,
         "report_generations": 200,
+        "speak_sessions": 200,
     },
     SubscriptionPlan.TEAM: {
         "proxy_sessions": None,
         "ai_question_batches": None,
         "report_generations": None,
+        "speak_sessions": None,
     },
 }
 
