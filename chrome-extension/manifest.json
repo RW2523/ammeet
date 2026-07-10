@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AmMeeting",
   "version": "1.0.0",
-  "description": "AI meeting proxy — asks your questions, collects answers, and represents you live in Zoom/Meet/Teams.",
+  "description": "AI meeting co-pilot: silently ticks off your talking points as you speak, takes notes, and captures every answer — in Meet, Zoom & Teams.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

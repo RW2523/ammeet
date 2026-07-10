@@ -20,8 +20,9 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_workspace_role
 from app.models.meeting import ContextSource, Meeting, Report
 from app.models.speaking import PointStatus, SpeakingPoint, SpeakingResponse
-from app.models.user import User, WorkspaceRole
+from app.models.user import User, Workspace, WorkspaceRole
 from app.services import speak_coverage
+from app.services.billing import check_and_increment_usage
 
 router = APIRouter()
 
@@ -97,6 +98,10 @@ async def generate_points(
         raw = (src.raw_text or "").strip() if src else ""
     if not raw:
         raise HTTPException(status_code=400, detail="Provide `text` or a `source_id` with extracted text.")
+
+    # Free-tier gate: preparing a session's points counts as one Speak session.
+    workspace = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one()
+    await check_and_increment_usage(db, workspace, "speak_sessions")
 
     points = await speak_coverage.generate_points(raw)
     if not points:
