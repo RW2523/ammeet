@@ -161,6 +161,43 @@ export class ApiClient {
     });
   }
 
+  // ── Speak Mode ─────────────────────────────────────────────────────────────
+
+  async generateSpeakPoints(
+    workspaceId: string,
+    meetingId: string,
+    text: string
+  ): Promise<import("./types").SpeakState> {
+    return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/points/generate`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  async getSpeakState(workspaceId: string, meetingId: string): Promise<import("./types").SpeakState> {
+    return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/state`);
+  }
+
+  async ingestSpeak(
+    workspaceId: string,
+    meetingId: string,
+    segments: { speaker: string; text: string }[]
+  ): Promise<import("./types").SpeakState> {
+    return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/ingest`, {
+      method: "POST",
+      body: JSON.stringify({ segments }),
+    });
+  }
+
+  async finalizeSpeak(
+    workspaceId: string,
+    meetingId: string
+  ): Promise<import("./types").SpeakSummary> {
+    return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/finalize`, {
+      method: "POST",
+    });
+  }
+
   // ── Transcription ─────────────────────────────────────────────────────────
 
   async transcribeAudio(

@@ -2,8 +2,23 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
 
+// Content scripts from the same extension share ONE isolated-world lexical scope, so
+// their top-level minified `const`/`let` (e.g. `r`) collide across files with
+// "Identifier 'r' has already been declared". They have no imports, so wrapping each
+// in an IIFE makes every top-level binding function-local and removes the clash.
+const wrapContentScriptsIife = {
+  name: "wrap-content-scripts-iife",
+  generateBundle(_options: unknown, bundle: Record<string, { type: string; code?: string }>) {
+    for (const [fileName, chunk] of Object.entries(bundle)) {
+      if (fileName.startsWith("content-") && chunk.type === "chunk" && chunk.code) {
+        chunk.code = `(()=>{\n${chunk.code}\n})();`;
+      }
+    }
+  },
+};
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), wrapContentScriptsIife],
   build: {
     outDir: "dist",
     emptyOutDir: true,

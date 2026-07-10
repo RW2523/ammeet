@@ -121,6 +121,44 @@ export interface NotetakerNotes {
   open_questions?: string[];
 }
 
+// ─── Speak Mode ───────────────────────────────────────────────────────────────
+export type SpeakPriority = "must" | "should" | "nice";
+export type SpeakPointStatus = "pending" | "covered" | "missed";
+
+export interface SpeakPoint {
+  id: string;
+  text: string;
+  stage: string;
+  priority: SpeakPriority;
+  order_index: number;
+  status: SpeakPointStatus;
+  covered_by_text?: string | null;
+}
+
+export interface SpeakResponse {
+  id: string;
+  speaker: string;
+  text: string;
+  kind: string; // response | question | decision
+  point_id: string | null;
+}
+
+export interface SpeakState {
+  points: SpeakPoint[];
+  responses: SpeakResponse[];
+  progress: { total: number; covered: number; missed: number; pending: number; must_remaining: number };
+  newly_covered?: string[];
+}
+
+export interface SpeakSummary {
+  summary: string;
+  covered: string[];
+  missed: string[];
+  action_items: { title: string; owner?: string | null }[];
+  follow_ups: string[];
+  responses: { speaker: string; text: string; kind: string }[];
+}
+
 export interface StoredState {
   auth: AuthState;
   backendUrl: string;

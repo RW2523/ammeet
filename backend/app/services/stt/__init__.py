@@ -29,6 +29,12 @@ class MockSTTProvider(RealtimeSTTProvider):
         await asyncio.sleep(0.2)
         return self._FIXTURE
 
+    async def transcribe_bytes(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
+        # Real audio was uploaded but no STT key is configured — be honest rather than
+        # returning fictional content (which looks like a bug when it repeats).
+        await asyncio.sleep(0.05)
+        return "[demo STT — set STT_PROVIDER=whisper + OPENAI_API_KEY for real audio transcription]"
+
 
 def get_stt() -> STTProvider:
     """Factory: returns the configured STT provider."""

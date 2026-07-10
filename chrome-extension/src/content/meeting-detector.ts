@@ -12,16 +12,61 @@
 import type { DetectedMeeting, MeetingPlatform, ExtensionMessage } from "../lib/types";
 import { startCaptionCapture, stopCaptionCapture } from "./caption-scraper";
 
+// ─── Lifecycle guard ──────────────────────────────────────────────────────────
+// After the extension is reloaded/updated, the OLD content script keeps running in
+// the page. Its timers/observers still fire, and chrome.runtime.sendMessage then
+// throws "Extension context invalidated" SYNCHRONOUSLY (so a .catch() never sees it).
+// We detect that, send safely, and tear the orphaned script down so it goes quiet.
+let _alive = true;
+const _timers: ReturnType<typeof setInterval>[] = [];
+let _observer: MutationObserver | null = null;
+
+function contextValid(): boolean {
+  try {
+    return _alive && !!chrome.runtime?.id;
+  } catch {
+    return false;
+  }
+}
+
+function teardown(): void {
+  if (!_alive) return;
+  _alive = false;
+  _timers.forEach(clearInterval);
+  _timers.length = 0;
+  if (_pollInterval) {
+    clearInterval(_pollInterval);
+    _pollInterval = null;
+  }
+  try { _observer?.disconnect(); } catch { /* noop */ }
+  try { stopCaptionCapture(); } catch { /* noop */ }
+}
+
+function sendToSW(msg: ExtensionMessage): void {
+  if (!contextValid()) {
+    teardown();
+    return;
+  }
+  try {
+    const p = chrome.runtime.sendMessage(msg);
+    // May return a promise (SW asleep) or throw synchronously (context invalidated).
+    if (p && typeof (p as Promise<unknown>).catch === "function") {
+      (p as Promise<unknown>).catch(() => {});
+    }
+  } catch {
+    teardown(); // "Extension context invalidated" — stop the orphaned script.
+  }
+}
+
 // ─── Notetaker: scrape live captions from THIS tab → service worker ───────────
 // Activated by the side panel via the service worker (NOTETAKER_SET_ACTIVE).
 chrome.runtime.onMessage.addListener((msg: ExtensionMessage) => {
+  if (!contextValid()) return;
   if (msg.type === "NOTETAKER_SET_ACTIVE") {
     if (msg.active) {
-      startCaptionCapture((seg) => {
-        chrome.runtime
-          .sendMessage({ type: "NOTETAKER_CAPTION", speaker: seg.speaker, text: seg.text })
-          .catch(() => {});
-      });
+      startCaptionCapture((seg) =>
+        sendToSW({ type: "NOTETAKER_CAPTION", speaker: seg.speaker, text: seg.text })
+      );
     } else {
       stopCaptionCapture();
     }
@@ -154,13 +199,11 @@ function buildDetectedMeeting(): DetectedMeeting {
   };
 }
 
-function sendToSW(msg: ExtensionMessage) {
-  chrome.runtime.sendMessage(msg).catch(() => {
-    // SW may be sleeping; it will catch up when it wakes
-  });
-}
-
 function checkMeetingState() {
+  if (!contextValid()) {
+    teardown();
+    return;
+  }
   const nowIn = isInMeeting(_platform);
 
   if (nowIn && !_inMeeting) {
@@ -186,25 +229,35 @@ function checkMeetingState() {
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
-// Check immediately + watch for DOM changes (participant joins/leaves)
+// Check immediately + poll (participant joins/leaves).
 checkMeetingState();
-setInterval(checkMeetingState, 3000);
+_timers.push(setInterval(checkMeetingState, 3000));
 
-// Also watch for SPA navigation (Meet/Teams are SPAs)
-const _observer = new MutationObserver(() => checkMeetingState());
-_observer.observe(document.body, { childList: true, subtree: true });
-
-// Handle navigation events in SPAs
-let _lastHref = location.href;
-setInterval(() => {
-  if (location.href !== _lastHref) {
-    _lastHref = location.href;
+// Watch for SPA navigation / UI changes — but Meet mutates the DOM constantly, so
+// DEBOUNCE to at most one check per 500ms (avoids hammering + repeated error spam).
+let _moDebounce: ReturnType<typeof setTimeout> | null = null;
+_observer = new MutationObserver(() => {
+  if (_moDebounce || !_alive) return;
+  _moDebounce = setTimeout(() => {
+    _moDebounce = null;
     checkMeetingState();
-  }
-}, 1000);
+  }, 500);
+});
+if (document.body) _observer.observe(document.body, { childList: true, subtree: true });
 
-// Cleanup on unload
+// Detect SPA URL changes (Meet/Teams are single-page apps).
+let _lastHref = location.href;
+_timers.push(
+  setInterval(() => {
+    if (location.href !== _lastHref) {
+      _lastHref = location.href;
+      checkMeetingState();
+    }
+  }, 1000)
+);
+
+// Cleanup on unload.
 window.addEventListener("beforeunload", () => {
   if (_inMeeting) sendToSW({ type: "MEETING_ENDED", tabId: -1 });
-  _observer.disconnect();
+  teardown();
 });

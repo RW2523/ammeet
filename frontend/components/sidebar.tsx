@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Users, Calendar, MessageSquare, BookOpen,
-  Settings, LogOut, ChevronRight, Zap, CreditCard, Cpu, Radio
+  Settings, LogOut, ChevronRight, Zap, CreditCard, Cpu, Radio, Mic
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore, useWorkspaceStore } from "@/lib/store";
@@ -19,6 +19,7 @@ const navItems = [
 const workspaceNavItems = (id: string) => [
   { href: `/workspaces/${id}`, label: "Overview", icon: LayoutDashboard },
   { href: `/workspaces/${id}/people`, label: "People & Roles", icon: Users },
+  { href: `/workspaces/${id}/speak`, label: "Speak Mode", icon: Mic },
   { href: `/workspaces/${id}/meetings`, label: "Meetings", icon: Calendar },
   { href: `/workspaces/${id}/test-join`, label: "Live Test (Join)", icon: Radio },
   { href: `/workspaces/${id}/knowledge`, label: "Knowledge Base", icon: BookOpen },
