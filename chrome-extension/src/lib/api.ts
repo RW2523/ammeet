@@ -198,6 +198,17 @@ export class ApiClient {
     });
   }
 
+  async shareReport(
+    workspaceId: string,
+    meetingId: string,
+    reportId: string
+  ): Promise<{ share_token: string; url: string }> {
+    return this.request(
+      `/workspaces/${workspaceId}/meetings/${meetingId}/reports/${reportId}/share`,
+      { method: "POST" }
+    );
+  }
+
   // ── Transcription ─────────────────────────────────────────────────────────
 
   async transcribeAudio(

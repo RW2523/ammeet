@@ -157,6 +157,7 @@ export interface SpeakSummary {
   action_items: { title: string; owner?: string | null }[];
   follow_ups: string[];
   responses: { speaker: string; text: string; kind: string }[];
+  report_id?: string;
 }
 
 export interface StoredState {

@@ -9,6 +9,7 @@ from app.routers import billing as billing_router
 from app.routers import llm as llm_router
 from app.routers import notetaker as notetaker_router
 from app.routers import speak as speak_router
+from app.routers import public as public_router
 from app.routers import live_session
 
 import asyncio
@@ -105,6 +106,7 @@ app.include_router(billing_router.webhook_router, prefix="/api/billing", tags=["
 app.include_router(llm_router.router, prefix="/api/llm", tags=["llm"])
 app.include_router(notetaker_router.router, prefix="/api/workspaces", tags=["notetaker"])
 app.include_router(speak_router.router, prefix="/api/workspaces", tags=["speak"])
+app.include_router(public_router.router, prefix="/api/public", tags=["public"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(live_session.router, prefix="/api", tags=["live-session"])
 
