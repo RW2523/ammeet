@@ -6,10 +6,11 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { speakApi, meetingApi, type SpeakState, type SpeakSummary } from "@/lib/api-client";
+import { SPEAK_TEMPLATES } from "@/lib/speak-templates";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Mic, Radio, Sparkles } from "lucide-react";
+import { ArrowLeft, Check, Mic, Radio, Share2, Sparkles } from "lucide-react";
 
 const PRIORITY_STYLE: Record<string, string> = {
   must: "bg-red-900/40 text-red-300",
@@ -37,6 +38,7 @@ export default function SpeakSessionPage() {
   const [summary, setSummary] = useState<SpeakSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [live, setLive] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Load any existing points.
@@ -95,6 +97,18 @@ export default function SpeakSessionPage() {
     }
   };
 
+  const share = async () => {
+    if (!summary?.report_id) return;
+    try {
+      const { url } = await speakApi.share(workspaceId, meetingId, summary.report_id);
+      setShareUrl(url);
+      await navigator.clipboard.writeText(url).catch(() => {});
+      toast.success("Share link copied — anyone with the link can view this recap.");
+    } catch {
+      toast.error("Couldn't create a share link.");
+    }
+  };
+
   const stages = state ? Array.from(new Set(state.points.map((p) => p.stage))) : [];
 
   return (
@@ -121,10 +135,26 @@ export default function SpeakSessionPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            <div>
+              <p className="text-xs text-slate-500 mb-2">Start from a template, or paste your own below:</p>
+              <div className="flex flex-wrap gap-2">
+                {SPEAK_TEMPLATES.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setNotes(t.body)}
+                    title={t.hint}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-300 hover:border-green-600 hover:text-white transition"
+                  >
+                    <span>{t.emoji}</span> {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              rows={8}
+              rows={10}
               placeholder="Paste your notes, agenda, sermon outline, interview questions, or demo script…"
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-green-500"
             />
@@ -212,7 +242,22 @@ export default function SpeakSessionPage() {
 
       {summary && (
         <Card className="bg-slate-900 border-slate-800">
-          <CardHeader><CardTitle className="text-white text-base">Session summary</CardTitle></CardHeader>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-white text-base">Session summary</CardTitle>
+              {summary.report_id && (
+                <Button size="sm" variant="outline" className="border-slate-700 text-slate-300 gap-1.5" onClick={share}>
+                  {shareUrl ? <Check className="h-4 w-4 text-green-400" /> : <Share2 className="h-4 w-4" />}
+                  {shareUrl ? "Copied" : "Share"}
+                </Button>
+              )}
+            </div>
+            {shareUrl && (
+              <p className="mt-2 text-xs text-slate-400 break-all">
+                Public link: <a href={shareUrl} target="_blank" rel="noreferrer" className="text-green-400 hover:underline">{shareUrl}</a>
+              </p>
+            )}
+          </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p className="text-slate-200">{summary.summary}</p>
             {summary.missed.length > 0 && (

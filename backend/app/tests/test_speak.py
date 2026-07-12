@@ -97,6 +97,46 @@ async def test_finalize_marks_missed_and_summarizes(client, auth_token, test_wor
 
 
 @pytest.mark.asyncio
+async def test_share_report_exposes_public_recap(client, auth_token, test_workspace, db_session):
+    h = {"Authorization": f"Bearer {auth_token}"}
+    m = await _make_meeting(db_session, test_workspace.id)
+    base = f"/api/workspaces/{test_workspace.id}/meetings/{m.id}"
+
+    gen = {"points": [{"text": "Point A", "stage": "Main", "priority": "must"}]}
+    with patch("app.services.speak_coverage.get_llm", return_value=_mock_llm(gen)):
+        await client.post(f"{base}/speak/points/generate", headers=h, json={"text": "..."})
+
+    summary = {"summary": "Great session.", "action_items": [], "follow_ups": []}
+    with patch("app.services.speak_coverage.get_llm", return_value=_mock_llm(summary)):
+        fin = await client.post(f"{base}/speak/finalize", headers=h, json={})
+    report_id = fin.json()["report_id"]
+
+    # Create the public share link.
+    r = await client.post(f"{base}/reports/{report_id}/share", headers=h)
+    assert r.status_code == 200, r.text
+    token = r.json()["share_token"]
+    assert token and "/r/" in r.json()["url"]
+
+    # Public recap is reachable WITHOUT auth and shows the shared content.
+    pub = await client.get(f"/api/public/reports/{token}")
+    assert pub.status_code == 200, pub.text
+    body = pub.json()
+    assert body["summary"] == "Great session."
+    assert body["missed"] == ["Point A"]
+
+    # Revoking makes the link 404.
+    await client.delete(f"{base}/reports/{report_id}/share", headers=h)
+    gone = await client.get(f"/api/public/reports/{token}")
+    assert gone.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_public_recap_unknown_token_404(client):
+    r = await client.get("/api/public/reports/this-token-does-not-exist-000000")
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_generate_requires_input(client, auth_token, test_workspace, db_session):
     h = {"Authorization": f"Bearer {auth_token}"}
     m = await _make_meeting(db_session, test_workspace.id)

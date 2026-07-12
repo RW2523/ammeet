@@ -246,6 +246,10 @@ class Report(Base):
     workspace_id: Mapped[str] = mapped_column(String(36), index=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     full_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # Full structured JSON
+    # Public share link: an opaque token that exposes a READ-ONLY recap at /r/{token}.
+    # Null = not shared. Revoking sharing just nulls the token.
+    share_token: Mapped[str | None] = mapped_column(String(48), nullable=True, unique=True, index=True)
+    shared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     slack_draft: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_draft: Mapped[str | None] = mapped_column(Text, nullable=True)
     jira_draft: Mapped[str | None] = mapped_column(Text, nullable=True)

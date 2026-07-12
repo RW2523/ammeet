@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_workspace_role
 from app.models.meeting import Meeting, MeetingMode, MeetingStatus, Question, QuestionStatus, Report
@@ -19,6 +22,11 @@ from app.services.proxy_engine import run_proxy_session
 from app.services.report_generator import generate_report, send_slack_draft
 
 router = APIRouter()
+_settings = get_settings()
+
+
+def _share_url(token: str) -> str:
+    return f"{_settings.frontend_url.rstrip('/')}/r/{token}"
 
 
 async def _workspace_or_404(db: AsyncSession, workspace_id: str) -> Workspace:
@@ -155,6 +163,60 @@ async def start_proxy_session(
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+async def _report_or_404(db: AsyncSession, workspace_id: str, report_id: str) -> Report:
+    result = await db.execute(
+        select(Report).where(Report.id == report_id, Report.workspace_id == workspace_id)
+    )
+    report = result.scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@router.post("/{workspace_id}/meetings/{meeting_id}/reports/{report_id}/share")
+async def share_report(
+    workspace_id: str,
+    meeting_id: str,
+    report_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Create (or return the existing) public read-only share link for a report."""
+    await require_workspace_role(workspace_id, user, db, WorkspaceRole.MEMBER)
+    report = await _report_or_404(db, workspace_id, report_id)
+    if not report.share_token:
+        report.share_token = secrets.token_urlsafe(24)
+        report.shared_at = datetime.now(UTC)
+        db.add(AuditLog(
+            workspace_id=workspace_id, user_id=user.id, action="report.shared",
+            resource_type="report", resource_id=report_id,
+        ))
+        await db.flush()
+    return {"share_token": report.share_token, "url": _share_url(report.share_token)}
+
+
+@router.delete("/{workspace_id}/meetings/{meeting_id}/reports/{report_id}/share")
+async def unshare_report(
+    workspace_id: str,
+    meeting_id: str,
+    report_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Revoke a report's public share link."""
+    await require_workspace_role(workspace_id, user, db, WorkspaceRole.MEMBER)
+    report = await _report_or_404(db, workspace_id, report_id)
+    if report.share_token:
+        report.share_token = None
+        report.shared_at = None
+        db.add(AuditLog(
+            workspace_id=workspace_id, user_id=user.id, action="report.unshared",
+            resource_type="report", resource_id=report_id,
+        ))
+        await db.flush()
+    return {"share_token": None}
 
 
 @router.post("/{workspace_id}/meetings/{meeting_id}/reports/{report_id}/send-slack")

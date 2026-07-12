@@ -26,6 +26,7 @@ import { BrowserSTT, captureTabAudio, startSegmentedRecording } from "../lib/stt
 import { BrowserTTS } from "../lib/tts";
 import { WSManager } from "../lib/websocket";
 import { getStoredState, getBackendUrl, setBackendUrl as persistBackendUrl, onStorageChange } from "../lib/store";
+import { SPEAK_TEMPLATES } from "../lib/speak-templates";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -108,6 +109,28 @@ function Section({
         {action}
       </div>
       <div className="p-3">{children}</div>
+    </div>
+  );
+}
+
+// Per-platform steps to switch on live captions (the transcript source).
+const CC_STEPS: Record<string, string> = {
+  meet: 'Click the "⋮ More options" menu (bottom bar) → "Turn on captions" (or press "c").',
+  zoom: 'Click "Show Captions" / "CC" in the Zoom toolbar → "Enable Live Transcription".',
+  teams: 'Click "⋯ More" → "Language and speech" → "Turn on live captions".',
+  unknown: "Open your meeting's menu and turn on live captions / CC.",
+};
+
+// Shown when capture is active but no caption lines are arriving — the #1 reason
+// tracking looks broken. Gives the exact steps for the detected platform.
+function CaptionHelp({ platform }: { platform?: string }) {
+  const steps = CC_STEPS[platform ?? "unknown"] ?? CC_STEPS.unknown;
+  return (
+    <div className="rounded-lg border border-amber-700/60 bg-amber-900/20 px-3 py-2 text-[11px]">
+      <p className="text-amber-300 font-semibold mb-0.5">⚠️ No captions detected yet</p>
+      <p className="text-amber-200/80">
+        Tracking needs the meeting&apos;s live captions. {steps}
+      </p>
     </div>
   );
 }
@@ -324,6 +347,7 @@ export default function SidePanel() {
   const [speakActive, setSpeakActive] = useState(false);
   const [speakSummary, setSpeakSummary] = useState<SpeakSummary | null>(null);
   const [speakBusy, setSpeakBusy] = useState(false);
+  const [speakShareUrl, setSpeakShareUrl] = useState<string | null>(null);
   const speakSentIdxRef = useRef(0);
   const transcriptRef = useRef<TranscriptLine[]>([]);
 
@@ -427,6 +451,36 @@ export default function SidePanel() {
   useEffect(() => {
     transcriptRef.current = transcript;
   }, [transcript]);
+
+  // ── Caption-starvation detector ────────────────────────────────────────────
+  // Capture is active but no caption lines are arriving → the user almost certainly
+  // hasn't turned on CC. Detect it and surface guided, per-platform steps.
+  const capturing = speakActive || notetakerActive;
+  const captureBaselineRef = useRef(0);
+  const [captureStartedAt, setCaptureStartedAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(0);
+
+  useEffect(() => {
+    if (capturing) {
+      captureBaselineRef.current = transcriptRef.current.length;
+      setCaptureStartedAt(Date.now());
+    } else {
+      setCaptureStartedAt(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capturing]);
+
+  useEffect(() => {
+    if (!capturing) return;
+    const t = setInterval(() => setNowTick(Date.now()), 2000);
+    return () => clearInterval(t);
+  }, [capturing]);
+
+  const captionsStarved =
+    capturing &&
+    captureStartedAt !== null &&
+    nowTick - captureStartedAt > 8000 &&
+    transcript.length <= captureBaselineRef.current;
 
   // Speak Mode: every few seconds, send new transcript lines to the coverage matcher.
   useEffect(() => {
@@ -824,6 +878,7 @@ export default function SidePanel() {
 
   const finishSpeak = async () => {
     setSpeakActive(false);
+    setSpeakShareUrl(null);
     sendSW({ type: "STOP_NOTETAKER", workspaceId: selectedWorkspace, meetingId: selectedMeeting });
     if (!selectedWorkspace || !selectedMeeting || !auth.accessToken) return;
     setSpeakBusy(true);
@@ -836,6 +891,19 @@ export default function SidePanel() {
       addEvent({ type: "error", text: `Speak: couldn't finalize (${e})` });
     } finally {
       setSpeakBusy(false);
+    }
+  };
+
+  const shareSpeak = async () => {
+    if (!speakSummary?.report_id || !auth.accessToken) return;
+    try {
+      const api = new ApiClient(backendUrl, auth.accessToken);
+      const { url } = await api.shareReport(selectedWorkspace, selectedMeeting, speakSummary.report_id);
+      setSpeakShareUrl(url);
+      await navigator.clipboard.writeText(url).catch(() => {});
+      addEvent({ type: "info", text: "Recap link copied — anyone with it can view the recap." });
+    } catch (e) {
+      addEvent({ type: "error", text: `Speak: couldn't create share link (${e})` });
     }
   };
 
@@ -917,6 +985,24 @@ export default function SidePanel() {
         {/* ── SESSION TAB ───────────────────────────────────────────────────── */}
         {tab === "session" && (
           <div className="p-3 space-y-3">
+            {/* First-run guidance — no bot joins; captions power everything. */}
+            {!detectedMeeting && (
+              <div className="rounded-xl border border-blue-800/50 bg-blue-900/15 p-3 space-y-1.5">
+                <p className="text-blue-300 font-semibold text-[12px]">👋 How AmMeeting works</p>
+                <p className="text-gray-300 text-[11px]">
+                  <span className="text-blue-400 font-semibold">1.</span> Open your Google Meet, Zoom, or Teams call in a tab.
+                </p>
+                <p className="text-gray-300 text-[11px]">
+                  <span className="text-blue-400 font-semibold">2.</span> Pick a workspace &amp; meeting below.
+                </p>
+                <p className="text-gray-300 text-[11px]">
+                  <span className="text-blue-400 font-semibold">3.</span> Open <b>🎤 Speak</b> or <b>📝 Notetaker</b> and hit Start.
+                </p>
+                <p className="text-gray-500 text-[10px] pt-0.5">
+                  No bot joins your call — AmMeeting reads the meeting&apos;s live captions from your own tab. Private by design.
+                </p>
+              </div>
+            )}
             {/* Meeting selector */}
             <Section title="Meeting Setup">
               <div className="space-y-2">
@@ -1139,11 +1225,24 @@ export default function SidePanel() {
                   Paste your notes, agenda, sermon outline, or talking points. AmMeeting turns them into a
                   prioritized checklist and ticks each one off as you say it — live and silent.
                 </p>
+                <div className="flex flex-wrap gap-1 mb-2">
+                  {SPEAK_TEMPLATES.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      title={t.hint}
+                      onClick={() => setSpeakInput(t.body)}
+                      className="inline-flex items-center gap-1 rounded-full border border-gray-700 bg-gray-800 px-2 py-0.5 text-[10px] text-gray-300 hover:border-green-600 hover:text-white transition"
+                    >
+                      <span>{t.emoji}</span> {t.label}
+                    </button>
+                  ))}
+                </div>
                 <textarea
                   value={speakInput}
                   onChange={(e) => setSpeakInput(e.target.value)}
-                  rows={6}
-                  placeholder="Paste your notes / agenda / outline here…"
+                  rows={7}
+                  placeholder="Paste your notes / agenda / outline here — or tap a template above…"
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-[12px] text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
                 <Btn onClick={generateSpeak} disabled={speakBusy || !speakInput.trim()} variant="green" className="mt-2">
@@ -1180,14 +1279,17 @@ export default function SidePanel() {
                     {speakActive && <span className="text-green-400 text-[11px] animate-pulse">● tracking</span>}
                     <Btn
                       variant="ghost"
-                      onClick={() => { setSpeakState(null); setSpeakInput(""); setSpeakSummary(null); setSpeakActive(false); }}
+                      onClick={() => { setSpeakState(null); setSpeakInput(""); setSpeakSummary(null); setSpeakActive(false); setSpeakShareUrl(null); }}
                       className="ml-auto"
                     >
                       ↺ New
                     </Btn>
                   </div>
-                  {speakActive && (
+                  {speakActive && !captionsStarved && (
                     <p className="text-gray-500 text-[10px] mt-1">Turn on captions (CC) in the meeting for best tracking.</p>
+                  )}
+                  {captionsStarved && (
+                    <div className="mt-2"><CaptionHelp platform={detectedMeeting?.platform} /></div>
                   )}
                 </Section>
 
@@ -1237,7 +1339,22 @@ export default function SidePanel() {
                 )}
 
                 {speakSummary && (
-                  <Section title="Session summary">
+                  <Section
+                    title="Session summary"
+                    action={
+                      speakSummary.report_id ? (
+                        <Btn variant="outline" onClick={shareSpeak} className="!px-2 !py-0.5 !text-[10px]">
+                          {speakShareUrl ? "✓ Copied" : "🔗 Share"}
+                        </Btn>
+                      ) : undefined
+                    }
+                  >
+                    {speakShareUrl && (
+                      <p className="text-[10px] text-gray-400 break-all mb-2">
+                        Public link:{" "}
+                        <a href={speakShareUrl} target="_blank" rel="noreferrer" className="text-green-400 hover:underline">{speakShareUrl}</a>
+                      </p>
+                    )}
                     <p className="text-[12px] text-gray-200 mb-2">{speakSummary.summary}</p>
                     {!!speakSummary.missed.length && (
                       <div className="mb-2">
@@ -1296,6 +1413,9 @@ export default function SidePanel() {
                     <span className="text-green-400 text-[11px] animate-pulse">● capturing ({notetakerLines} lines)</span>
                   )}
                 </div>
+              )}
+              {captionsStarved && notetakerActive && (
+                <div className="mt-2"><CaptionHelp platform={detectedMeeting?.platform} /></div>
               )}
             </Section>
 

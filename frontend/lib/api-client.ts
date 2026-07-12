@@ -282,6 +282,7 @@ export interface SpeakSummary {
   action_items: { title: string; owner?: string | null }[];
   follow_ups: string[];
   responses: { speaker: string; text: string; kind: string }[];
+  report_id?: string;
 }
 
 export const speakApi = {
@@ -302,4 +303,10 @@ export const speakApi = {
       .then((r) => r.data),
   finalize: (workspaceId: string, meetingId: string) =>
     api.post<SpeakSummary>(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/finalize`).then((r) => r.data),
+  share: (workspaceId: string, meetingId: string, reportId: string) =>
+    api
+      .post<{ share_token: string; url: string }>(
+        `/workspaces/${workspaceId}/meetings/${meetingId}/reports/${reportId}/share`
+      )
+      .then((r) => r.data),
 };
