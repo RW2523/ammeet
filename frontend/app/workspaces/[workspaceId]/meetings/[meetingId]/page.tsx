@@ -4,7 +4,8 @@ import { useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { meetingApi, questionApi, reportApi } from "@/lib/api-client";
+import { isAxiosError } from "axios";
+import { delegateApi, meetingApi, questionApi, reportApi } from "@/lib/api-client";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -17,7 +18,7 @@ import {
   History, HelpCircle
 } from "lucide-react";
 import Link from "next/link";
-import type { PrepBrief, Question, ProxyEvent, Report } from "@/lib/types";
+import type { DelegateSession, DelegateStage, Meeting, PrepBrief, Question, ProxyEvent, Report } from "@/lib/types";
 import { BASE_URL } from "@/lib/api";
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -702,6 +703,9 @@ function ProxyRoom({
         </div>
       )}
 
+      {/* R2 "Delegate": AI attends on your behalf */}
+      <DelegateCard meeting={meeting} />
+
       {/* Event stream */}
       {(proxyEvents.length > 0 || proxyRunning) && (
         <Card className="bg-slate-950 border-slate-800">
@@ -769,6 +773,216 @@ function ProxyRoom({
         </Card>
       )}
     </div>
+  );
+}
+
+// ── Delegate Card (R2) ─────────────────────────────────────────────────────────
+
+const DELEGATE_STAGE_OPTIONS: { value: DelegateStage; label: string; description: string }[] = [
+  { value: "silent", label: "Silent", description: "Joins, discloses, records, reports" },
+  { value: "briefed", label: "Briefed", description: "Also delivers your approved updates and asks your prepared questions" },
+];
+
+const DELEGATE_STATUS_TEXT: Record<string, string> = {
+  created: "Delegate session created — waiting to join…",
+  joining: "Delegate is joining the meeting…",
+  active: "Delegate is in the meeting",
+  leaving: "Delegate is leaving the meeting…",
+  done: "Delegate session complete",
+  error: "Delegate session failed",
+};
+
+function delegateErrorMessage(err: unknown, fallback: string): string {
+  if (isAxiosError(err)) {
+    const data = err.response?.data as { detail?: unknown } | undefined;
+    if (typeof data?.detail === "string" && data.detail) return data.detail;
+    switch (err.response?.status) {
+      case 403:
+        return "Proxy consent must be enabled before the delegate can join.";
+      case 409:
+        return "A delegate session is already active for this meeting.";
+      case 422:
+        return "Briefed mode requires text-to-speech to be configured. Try Silent instead.";
+    }
+  }
+  return fallback;
+}
+
+function formatDelegateTs(ts?: string | null): string | null {
+  if (!ts) return null;
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? ts : d.toLocaleString();
+}
+
+function DelegateCard({ meeting }: { meeting: Meeting }) {
+  const workspaceId = meeting.workspace_id;
+  const meetingId = meeting.id;
+  const qc = useQueryClient();
+  const [stage, setStage] = useState<DelegateStage>("silent");
+
+  const { data: session } = useQuery({
+    queryKey: ["delegate-session", workspaceId, meetingId],
+    queryFn: async (): Promise<DelegateSession | null> => {
+      try {
+        return await delegateApi.status(workspaceId, meetingId);
+      } catch (err) {
+        // 404 = no delegate session has ever been started for this meeting.
+        if (isAxiosError(err) && err.response?.status === 404) return null;
+        throw err;
+      }
+    },
+    retry: false,
+    // Poll every 5s while a session is underway; stop once it's done or errored.
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s && s !== "done" && s !== "error" ? 5000 : false;
+    },
+  });
+
+  const startMutation = useMutation({
+    mutationFn: () => delegateApi.start(workspaceId, meetingId, stage),
+    onSuccess: (s) => {
+      toast.success(stage === "briefed" ? "Delegate is joining with your briefing." : "Delegate is joining silently.");
+      qc.setQueryData(["delegate-session", workspaceId, meetingId], s);
+    },
+    onError: (err) => toast.error(delegateErrorMessage(err, "Couldn't start the delegate.")),
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: () => delegateApi.stop(workspaceId, meetingId),
+    onSuccess: (s) => {
+      toast.success("Delegate session stopped.");
+      qc.setQueryData(["delegate-session", workspaceId, meetingId], s);
+    },
+    onError: (err) => toast.error(delegateErrorMessage(err, "Couldn't stop the delegate.")),
+  });
+
+  const status = session?.status;
+  const sessionLive = !!status && status !== "done" && status !== "error";
+  const hasConsent = meeting.proxy_consent_given;
+  const followUps = (session?.follow_ups ?? []).filter((f) => f?.text);
+  const disclosedAt = formatDelegateTs(session?.disclosure_logged_at);
+
+  return (
+    <Card className="bg-slate-900 border-slate-800">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-white text-sm flex items-center gap-2">
+          <Bot className="h-4 w-4 text-purple-400" /> Delegate
+        </CardTitle>
+        <CardDescription className="text-slate-400 text-sm">
+          Send AmMeeting to attend this meeting on your behalf. It always discloses itself first.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Stage picker */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {DELEGATE_STAGE_OPTIONS.map((opt) => {
+            const selected = stage === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setStage(opt.value)}
+                disabled={sessionLive || startMutation.isPending}
+                className={`text-left rounded-xl border p-3 transition-colors disabled:opacity-50 ${
+                  selected ? "border-purple-600 bg-purple-900/20" : "border-slate-700 bg-slate-900 hover:border-slate-500"
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span
+                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center flex-shrink-0 ${
+                      selected ? "border-purple-400" : "border-slate-500"
+                    }`}
+                  >
+                    {selected && <span className="w-2 h-2 rounded-full bg-purple-400" />}
+                  </span>
+                  <span className="text-sm font-medium text-white">{opt.label}</span>
+                </span>
+                <span className="block text-xs text-slate-400 mt-1">{opt.description}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Live status line */}
+        {status && (
+          <div className="flex items-center gap-2 text-sm flex-wrap">
+            <div
+              className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                status === "active" ? "bg-green-400 animate-pulse" :
+                status === "error" ? "bg-red-400" :
+                status === "done" ? "bg-slate-600" :
+                "bg-blue-400 animate-pulse"
+              }`}
+            />
+            <span className={status === "error" ? "text-red-300" : "text-slate-300"}>
+              {DELEGATE_STATUS_TEXT[status] ?? `Delegate status: ${status}`}
+            </span>
+            {status === "done" && formatDelegateTs(session?.ended_at) && (
+              <span className="text-xs text-slate-500">Ended {formatDelegateTs(session?.ended_at)}</span>
+            )}
+          </div>
+        )}
+        {status === "error" && session?.error_detail && (
+          <p className="text-sm text-red-300/80">{session.error_detail}</p>
+        )}
+
+        {/* Disclosure timestamp — trust signal */}
+        {disclosedAt && (
+          <div className="flex items-center gap-2 text-sm text-blue-300 bg-blue-900/20 border border-blue-800 rounded-lg px-3 py-2">
+            <Shield className="h-4 w-4 flex-shrink-0" />
+            <span>Disclosed at {disclosedAt} — participants were told an AI delegate is present.</span>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <Button
+            onClick={() => startMutation.mutate()}
+            disabled={!hasConsent || sessionLive || startMutation.isPending}
+            className="bg-purple-600 hover:bg-purple-700"
+          >
+            <Bot className="h-4 w-4 mr-2" />
+            {startMutation.isPending ? "Starting…" : "Start Delegate"}
+          </Button>
+          {status === "active" && (
+            <Button
+              variant="outline"
+              onClick={() => stopMutation.mutate()}
+              disabled={stopMutation.isPending}
+              className="border-red-800 text-red-300 hover:bg-red-900/30"
+            >
+              {stopMutation.isPending ? "Stopping…" : "Stop Delegate"}
+            </Button>
+          )}
+        </div>
+        {!hasConsent && (
+          <p className="text-orange-400 text-sm">
+            Proxy consent must be enabled on this meeting before the delegate can join.
+          </p>
+        )}
+
+        {/* Questions participants asked that the delegate captured for you */}
+        {followUps.length > 0 && (
+          <div>
+            <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+              <HelpCircle className="h-3.5 w-3.5" /> Questions for you
+            </h4>
+            <div className="space-y-2">
+              {followUps.map((f, i) => (
+                <div key={i} className="border border-slate-800 rounded-lg p-3">
+                  <p className="text-sm text-slate-300">{f?.text}</p>
+                  <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
+                    {f?.asker && <span>Asked by {f.asker}</span>}
+                    {formatDelegateTs(f?.ts) && <span>{formatDelegateTs(f?.ts)}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -859,6 +1073,60 @@ function ReportTab({
                   </div>
                 </div>
               ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* R2 Delegate: what the delegate said in the meeting */}
+      {((fullData.delegate_utterances as unknown[] | undefined)?.length ?? 0) > 0 && (
+        <Card className="bg-slate-900 border-slate-800">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-white text-sm flex items-center gap-2">
+              <Bot className="h-4 w-4 text-purple-400" /> What Your Delegate Said
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {(fullData.delegate_utterances as Array<{ text?: string; ts?: string } | string>).map((u, i) => {
+                const text = typeof u === "string" ? u : u?.text ?? "";
+                const ts = typeof u === "string" ? null : formatDelegateTs(u?.ts);
+                return (
+                  <div key={i} className="flex items-start justify-between gap-4 py-2 border-b border-slate-800 last:border-0">
+                    <p className="text-sm text-slate-300 italic">&quot;{text}&quot;</p>
+                    {ts && <span className="text-xs text-slate-500 flex-shrink-0">{ts}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* R2 Delegate: questions participants asked that were captured for you */}
+      {((fullData.delegate_follow_ups as unknown[] | undefined)?.length ?? 0) > 0 && (
+        <Card className="bg-slate-900 border-slate-800">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-white text-sm flex items-center gap-2">
+              <HelpCircle className="h-4 w-4 text-amber-400" /> Questions Captured For You
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {(fullData.delegate_follow_ups as Array<{ asker?: string; text?: string; ts?: string } | string>).map((f, i) => {
+                const text = typeof f === "string" ? f : f?.text ?? "";
+                const asker = typeof f === "string" ? null : f?.asker;
+                const ts = typeof f === "string" ? null : formatDelegateTs(f?.ts);
+                return (
+                  <div key={i} className="border border-slate-800 rounded-lg p-3">
+                    <p className="text-sm text-slate-300">{text}</p>
+                    <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
+                      {asker && <span>Asked by {asker}</span>}
+                      {ts && <span>{ts}</span>}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </CardContent>
         </Card>

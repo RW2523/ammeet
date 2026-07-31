@@ -39,6 +39,7 @@ from app.core.security import decode_token, webhook_secret
 from app.models.meeting import Meeting, MeetingMode, MeetingStatus, Question, QuestionStatus
 from app.models.meeting_bot import BotStatus, MeetingBot
 from app.models.user import AuditLog, User, WorkspaceMember, WorkspaceRole
+from app.services.delegate_engine import get_active_delegate
 from app.services.live_proxy import (
     get_active_session,
     launch_session,
@@ -212,13 +213,16 @@ async def recall_webhook(
                 is_final=is_final,
             )
 
-            # Push to whichever agent is live for this meeting (proxy or assistant)
+            # Push to whichever agent is live for this meeting (proxy, assistant, or delegate)
             session = get_active_session(meeting_id)
             if session:
                 await session.ingest_transcript_segment(segment)
             assistant = get_active_assistant(meeting_id)
             if assistant:
                 await assistant.ingest_transcript_segment(segment)
+            delegate = get_active_delegate(meeting_id)
+            if delegate:
+                await delegate.ingest_transcript_segment(segment)
 
             # Broadcast raw transcript to WebSocket clients
             await _manager.broadcast(meeting_id, {

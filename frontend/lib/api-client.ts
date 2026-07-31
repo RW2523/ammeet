@@ -1,5 +1,5 @@
 import { api } from "./api";
-import type { ActionItem, CalendarEvent, Meeting, OpenItems, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
+import type { ActionItem, CalendarEvent, DelegateSession, DelegateStage, Meeting, OpenItems, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
 
 // Auth
 export const authApi = {
@@ -211,6 +211,30 @@ export const assistantApi = {
     ).then((r) => r.data),
   stop: (workspaceId: string, meetingId: string) =>
     api.post<{ status: string }>(`/workspaces/${workspaceId}/meetings/${meetingId}/assistant/stop`).then((r) => r.data),
+};
+
+// R2 "Delegate": the AI attends the meeting on your behalf.
+export const delegateApi = {
+  // start nests the session under `session`; stop returns only a stopping ack —
+  // normalize both to a DelegateSession (possibly partial) for the query cache.
+  start: (workspaceId: string, meetingId: string, stage: DelegateStage) =>
+    api
+      .post<{ session?: DelegateSession } & DelegateSession>(
+        `/workspaces/${workspaceId}/meetings/${meetingId}/delegate/start`,
+        { stage },
+      )
+      .then((r) => r.data.session ?? r.data),
+  stop: (workspaceId: string, meetingId: string) =>
+    api
+      .post<{ session?: DelegateSession } & Partial<DelegateSession>>(
+        `/workspaces/${workspaceId}/meetings/${meetingId}/delegate/stop`,
+      )
+      .then((r) => (r.data.session ?? { status: "leaving", ...r.data }) as DelegateSession),
+  /** 404 = no delegate session was ever started for this meeting. */
+  status: (workspaceId: string, meetingId: string) =>
+    api
+      .get<DelegateSession>(`/workspaces/${workspaceId}/meetings/${meetingId}/delegate/status`)
+      .then((r) => r.data),
 };
 
 // Live session / meeting bot

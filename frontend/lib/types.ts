@@ -180,6 +180,28 @@ export interface OpenItems {
   questions: OpenItem[];
 }
 
+// R2 "Delegate": the AI attends the meeting on your behalf.
+export type DelegateStage = "silent" | "briefed";
+export type DelegateSessionStatus = "created" | "joining" | "active" | "leaving" | "done" | "error";
+
+// A question a participant asked that the delegate captured for you.
+export interface DelegateFollowUp {
+  asker?: string | null;
+  text?: string | null;
+  ts?: string | null;
+}
+
+export interface DelegateSession {
+  id: string;
+  stage: DelegateStage;
+  status: DelegateSessionStatus;
+  disclosure_logged_at?: string | null;
+  follow_ups?: DelegateFollowUp[] | null;
+  error_detail?: string | null;
+  created_at?: string | null;
+  ended_at?: string | null;
+}
+
 export interface ProxyEvent {
   type: "disclosure" | "asking" | "answered" | "escalation" | "clarifying" | "info" | "session_complete" | "report_ready" | "error" | "bot_status" | "transcript" | "tts_audio";
   question_id?: string;

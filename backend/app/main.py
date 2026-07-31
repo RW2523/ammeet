@@ -6,6 +6,7 @@ from app.core.logging import get_logger, setup_logging
 from app.core.redis import close_redis, get_redis
 from app.routers import auth, workspaces, people, meetings, questions, reports, knowledge, integrations, admin
 from app.routers import billing as billing_router
+from app.routers import delegate as delegate_router
 from app.routers import llm as llm_router
 from app.routers import notetaker as notetaker_router
 from app.routers import speak as speak_router
@@ -106,6 +107,7 @@ app.include_router(billing_router.webhook_router, prefix="/api/billing", tags=["
 app.include_router(llm_router.router, prefix="/api/llm", tags=["llm"])
 app.include_router(notetaker_router.router, prefix="/api/workspaces", tags=["notetaker"])
 app.include_router(speak_router.router, prefix="/api/workspaces", tags=["speak"])
+app.include_router(delegate_router.router, prefix="/api/workspaces", tags=["delegate"])
 app.include_router(public_router.router, prefix="/api/public", tags=["public"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(live_session.router, prefix="/api", tags=["live-session"])
