@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 from app.core.redis import publish_event
 from app.models.delegate import DelegateSession, DelegateSessionStatus, DelegateStage
@@ -43,9 +44,13 @@ from app.services.llm import get_llm
 from app.services.meeting_bot import get_bot_provider
 from app.services.meeting_bot.base import BotInfo, TranscriptSegment
 from app.services.report_generator import generate_report
-from app.services.tts import get_tts
+from app.services.tts import MockTTSProvider, get_tts
 
 _logger = get_logger(__name__)
+
+_JOIN_POLL_SECONDS = 2.5
+_JOIN_POLL_ATTEMPTS = 48  # ~120s
+_JOIN_MAX_CONSECUTIVE_FAILURES = 6
 
 # Hard-coded, never LLM-generated (architecture doc §2.4 rule 1 + kill-switch rule 5).
 DELEGATE_DISCLOSURE = (
@@ -94,6 +99,7 @@ class DelegateAgent:
         self._killed = False
         self._never_commit_used = False
         self._follow_ups: list[dict[str, Any]] = []
+        self._wrap_error: str | None = None
 
     # ── External hooks ──────────────────────────────────────────────────────
 
@@ -112,27 +118,51 @@ class DelegateAgent:
         try:
             async for event in self._run_impl():
                 yield event
+        except asyncio.CancelledError:
+            _logger.warning("Delegate session %s cancelled", self._session.id)
+            await self._persist_error_state("delegate task cancelled")
+            raise
         except Exception as exc:  # noqa: BLE001
-            _logger.exception("Delegate session crashed: %s", exc)
-            self._session.status = DelegateSessionStatus.ERROR.value
-            self._session.error_detail = str(exc)[:2000]
-            self._session.ended_at = datetime.now(UTC)
-            try:
-                await self._db.flush()
-            except Exception:  # noqa: BLE001
-                pass
+            _logger.exception("Delegate session %s crashed: %s", self._session.id, exc)
+            await self._persist_error_state(str(exc))
             yield {"type": "error", "text": f"Delegate error: {exc}"}
         finally:
             await self._cleanup()
+
+    async def _persist_error_state(self, detail: str) -> None:
+        """Persist status=error through a FRESH session so a poisoned/mid-transaction
+        crash can never lose the error state, then mirror it in memory."""
+        try:
+            await self._db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        ended = datetime.now(UTC)
+        self._session.status = DelegateSessionStatus.ERROR.value
+        self._session.error_detail = detail[:2000]
+        self._session.ended_at = ended
+        try:
+            async with AsyncSessionLocal() as fresh:
+                row = (await fresh.execute(
+                    select(DelegateSession).where(DelegateSession.id == self._session.id)
+                )).scalar_one_or_none()
+                if row is not None:
+                    row.status = DelegateSessionStatus.ERROR.value
+                    row.error_detail = detail[:2000]
+                    row.ended_at = ended
+                    await fresh.commit()
+        except Exception as exc:  # noqa: BLE001
+            _logger.error("Could not persist error state for delegate session %s: %s", self._session.id, exc)
 
     # ── Implementation ──────────────────────────────────────────────────────
 
     async def _run_impl(self) -> AsyncGenerator[dict[str, Any], None]:
         meeting_id = self._meeting.id
 
-        # 1. Deploy the bot and VERIFY it is in the meeting before claiming joined
+        # 1. Deploy the bot and VERIFY it is in the meeting before claiming joined.
+        # Every milestone below COMMITS so the status endpoint (a different session)
+        # sees live state and a crash can't lose progress.
         self._session.status = DelegateSessionStatus.JOINING.value
-        await self._db.flush()
+        await self._db.commit()
         yield self._status_event("joining", "Deploying delegate bot…")
 
         from app.core.security import webhook_secret
@@ -156,36 +186,46 @@ class DelegateAgent:
             created_by_id=self._session.created_by_id,
         )
         self._db.add(self._db_bot)
-        await self._db.flush()
+        await self._db.commit()
 
         joined = False
-        for attempt in range(48):  # ~120s at 2.5s intervals
+        join_error: str | None = None
+        consecutive_failures = 0
+        for attempt in range(_JOIN_POLL_ATTEMPTS):
             if self._stop.is_set():
                 break
             if attempt:
-                await asyncio.sleep(2.5)
+                await asyncio.sleep(_JOIN_POLL_SECONDS)
             try:
                 info = await self._bot_provider.get_bot_status(self._bot_info.bot_id)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # Repeated provider failures/404s are terminal (e.g. the worker
+                # evicted the bot) — never poll silently forever.
+                consecutive_failures += 1
+                if consecutive_failures >= _JOIN_MAX_CONSECUTIVE_FAILURES:
+                    join_error = f"bot status unavailable from provider: {exc}"
+                    break
                 continue
+            consecutive_failures = 0
             self._db_bot.status = info.status
             await self._db.flush()
             if info.status == "in_meeting":
                 joined = True
                 break
             if info.status in ("error", "done", "failed", "leaving"):
+                join_error = f"bot ended before joining (status={info.status})"
                 break
 
         if not joined:
             self._session.status = DelegateSessionStatus.ERROR.value
-            self._session.error_detail = "The delegate bot could not get into the meeting."
+            self._session.error_detail = join_error or "The delegate bot could not get into the meeting."
             self._session.ended_at = datetime.now(UTC)
-            await self._db.flush()
+            await self._db.commit()
             yield self._status_event("error", "Delegate could not join the meeting — ending session.")
             return
 
         self._session.status = DelegateSessionStatus.ACTIVE.value
-        await self._db.flush()
+        await self._db.commit()
         yield self._status_event("active", f"Delegate is IN the meeting ({self._stage} stage).")
 
         # 2. Disclosure — always the FIRST utterance, hard-coded
@@ -200,7 +240,7 @@ class DelegateAgent:
             resource_id=self._session.id,
             detail=f"stage={self._stage}",
         ))
-        await self._db.flush()
+        await self._db.commit()
         yield {"type": "disclosure", "text": disclosure}
         async for ev in self._say(disclosure):
             yield ev
@@ -220,6 +260,11 @@ class DelegateAgent:
             try:
                 segment = await asyncio.wait_for(self._incoming.get(), timeout=120)
             except asyncio.TimeoutError:
+                # Prolonged silence: make sure the bot still exists (the worker
+                # evicts dead bots) before wrapping as a normal session end.
+                if await self._bot_is_gone():
+                    self._wrap_error = "bot no longer exists on worker"
+                    yield self._status_event("error", "Delegate bot is gone from the meeting — ending session.")
                 break
             if segment is None:
                 break
@@ -266,7 +311,7 @@ class DelegateAgent:
             "questions": [{"question_id": q.id, "text": q.text} for q in questions],
         }
         self._session.script_json = json.dumps(script)
-        await self._db.flush()
+        await self._db.commit()
         yield {"type": "delegate_script", "updates": len(points), "questions": len(questions)}
 
         for point in points:
@@ -285,7 +330,7 @@ class DelegateAgent:
             async for ev in self._say(question.text):
                 yield ev
             question.status = QuestionStatus.ASKED
-            await self._db.flush()
+            await self._db.commit()
 
     async def _drain_for_kill(self) -> bool:
         """Between script items, honor a kill switch already sitting in the queue."""
@@ -332,7 +377,7 @@ class DelegateAgent:
         entry = {"asker": segment.speaker, "text": text, "ts": segment.timestamp_ms}
         self._follow_ups.append(entry)
         self._session.follow_ups_json = json.dumps(self._follow_ups)
-        await self._db.flush()
+        await self._db.commit()
         yield {"type": "delegate_follow_up", **entry}
 
         # The delegate NEVER answers (that's stage C). If directly pressed on a
@@ -361,13 +406,13 @@ class DelegateAgent:
             resource_id=self._session.id,
             detail=f"speaker={segment.speaker} text={segment.text[:300]}",
         ))
-        await self._db.flush()
+        await self._db.commit()
 
     # ── Wrap ────────────────────────────────────────────────────────────────
 
     async def _wrap(self) -> AsyncGenerator[dict[str, Any], None]:
         self._session.status = DelegateSessionStatus.LEAVING.value
-        await self._db.flush()
+        await self._db.commit()
 
         if self._bot_info:
             try:
@@ -382,9 +427,13 @@ class DelegateAgent:
                 self._db_bot.transcript_json = json.dumps(
                     [{"speaker": s.speaker, "text": s.text, "timestamp_ms": s.timestamp_ms} for s in self._transcript]
                 )
-        self._session.status = DelegateSessionStatus.DONE.value
+        if self._wrap_error:
+            self._session.status = DelegateSessionStatus.ERROR.value
+            self._session.error_detail = self._wrap_error
+        else:
+            self._session.status = DelegateSessionStatus.DONE.value
         self._session.ended_at = now
-        await self._db.flush()
+        await self._db.commit()
 
         try:
             report = await generate_report(self._db, self._meeting)
@@ -392,10 +441,14 @@ class DelegateAgent:
             full["delegate_utterances"] = await self._collect_utterances()
             full["delegate_follow_ups"] = self._follow_ups
             report.full_json = json.dumps(full)
-            await self._db.flush()
+            await self._db.commit()
             yield {"type": "report_ready", "report_id": report.id}
         except Exception as exc:  # noqa: BLE001
             _logger.warning("Delegate report generation failed: %s", exc)
+            try:
+                await self._db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
 
         try:
             ws = (await self._db.execute(
@@ -403,10 +456,14 @@ class DelegateAgent:
             )).scalar_one_or_none()
             if ws:
                 await check_and_increment_usage(self._db, ws, "delegate_sessions")
+                await self._db.commit()
         except Exception as exc:  # noqa: BLE001
             _logger.warning("delegate_sessions usage increment failed: %s", exc)
 
-        yield self._status_event("done", "Delegate session complete.")
+        if self._wrap_error:
+            yield self._status_event("error", f"Delegate session ended with error: {self._wrap_error}")
+        else:
+            yield self._status_event("done", "Delegate session complete.")
 
     async def _collect_utterances(self) -> list[dict[str, Any]]:
         rows = (await self._db.execute(
@@ -438,7 +495,7 @@ class DelegateAgent:
         }
 
     async def _audit_utterance(self, text: str, kind: str) -> None:
-        """Verbatim audit row for anything the delegate says — written BEFORE speaking."""
+        """Verbatim audit row for anything the delegate says — committed BEFORE speaking."""
         detail: dict[str, Any] = {"text": text, "kind": kind}
         if self._settings.tts_provider == "none":
             detail["tts"] = "tts_unavailable"
@@ -450,25 +507,40 @@ class DelegateAgent:
             resource_id=self._session.id,
             detail=json.dumps(detail),
         ))
-        await self._db.flush()
+        await self._db.commit()
 
     async def _say(self, text: str) -> AsyncGenerator[dict[str, Any], None]:
-        """Speak into the meeting via the bot and stream the same audio to the browser."""
+        """Speak into the meeting via the bot and stream the same audio to the browser.
+        Only REAL audio ever hits the wire — with TTS none/mock (dummy bytes) or an
+        empty synthesis result, nothing is sent to the bot."""
+        if self._settings.tts_provider == "none" or isinstance(self._tts, MockTTSProvider):
+            return
         audio: bytes | None = None
         try:
             audio = (await self._tts.synthesize(text)) or None
         except Exception as exc:  # noqa: BLE001
             _logger.warning("Delegate TTS failed (non-fatal): %s", exc)
-        if self._bot_info and audio:
+        if not audio:
+            return
+        if self._bot_info:
             try:
                 await self._bot_provider.output_audio(self._bot_info.bot_id, audio)
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("Delegate output_audio failed: %s", exc)
-        if audio:
-            yield {"type": "tts_audio", "text": text, "audio_b64": base64.b64encode(audio).decode("utf-8")}
+        yield {"type": "tts_audio", "text": text, "audio_b64": base64.b64encode(audio).decode("utf-8")}
+
+    async def _bot_is_gone(self) -> bool:
+        if not self._bot_info:
+            return False
+        try:
+            info = await self._bot_provider.get_bot_status(self._bot_info.bot_id)
+        except Exception:  # noqa: BLE001
+            return True
+        return info.status in ("done", "error")
 
     async def _cleanup(self) -> None:
-        if self._session.status == DelegateSessionStatus.DONE.value and self._session.ended_at:
+        terminal = (DelegateSessionStatus.DONE.value, DelegateSessionStatus.ERROR.value)
+        if self._session.status in terminal and self._session.ended_at:
             return
         if self._bot_info:
             try:
@@ -482,7 +554,7 @@ class DelegateAgent:
             self._session.status = DelegateSessionStatus.ERROR.value
             self._session.ended_at = datetime.now(UTC)
         try:
-            await self._db.flush()
+            await self._db.commit()
         except Exception:  # noqa: BLE001
             pass
 
@@ -509,7 +581,6 @@ async def launch_delegate(
     """Run a delegate session in the background with its OWN DB session; every
     yielded event is published to Redis for the meeting's WebSocket clients."""
 
-    from app.core.database import AsyncSessionLocal
     from app.models.meeting import MeetingStatus
 
     async def _runner() -> None:
