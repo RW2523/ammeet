@@ -5,6 +5,9 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
+# NEXT_PUBLIC_* values are inlined at BUILD time — must arrive as build args.
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
 
 FROM node:22-alpine AS runner

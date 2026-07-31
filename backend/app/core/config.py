@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # STT — "mock" | "whisper" | "assemblyai"
     stt_provider: Literal["mock", "whisper", "assemblyai"] = "mock"
     assemblyai_api_key: str = ""
+    # Any OpenAI-compatible /audio/transcriptions server. Point at a local
+    # faster-whisper/whisper.cpp server (e.g. http://stt:8001/v1) for on-prem STT;
+    # the API key is only required for the real OpenAI endpoint.
+    whisper_base_url: str = "https://api.openai.com/v1"
 
     # TTS — "none" | "openai"
     tts_provider: Literal["none", "openai"] = "openai"

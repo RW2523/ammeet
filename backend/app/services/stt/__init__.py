@@ -42,10 +42,12 @@ def get_stt() -> STTProvider:
     settings = get_settings()
 
     if settings.stt_provider == "whisper":
-        if not settings.openai_api_key:
+        # A key is only needed for the real OpenAI endpoint; self-hosted
+        # OpenAI-compatible servers (WHISPER_BASE_URL) don't require one.
+        if "api.openai.com" in settings.whisper_base_url and not settings.openai_api_key:
             raise ValueError(
-                "OPENAI_API_KEY required for stt_provider=whisper. "
-                "Set stt_provider=mock to use the mock provider."
+                "OPENAI_API_KEY required for stt_provider=whisper with the OpenAI endpoint. "
+                "Set WHISPER_BASE_URL to a local server, or stt_provider=mock."
             )
         from app.services.stt.whisper import WhisperSTTProvider
         return WhisperSTTProvider()

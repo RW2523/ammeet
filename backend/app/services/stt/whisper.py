@@ -26,9 +26,11 @@ class WhisperSTTProvider(STTProvider):
     """
 
     def __init__(self) -> None:
+        # Local OpenAI-compatible servers (faster-whisper, whisper.cpp) ignore the
+        # key but still expect a well-formed Authorization header.
         self._client = httpx.AsyncClient(
-            base_url="https://api.openai.com/v1",
-            headers={"Authorization": f"Bearer {_settings.openai_api_key}"},
+            base_url=_settings.whisper_base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {_settings.openai_api_key or 'local'}"},
             timeout=120.0,
         )
 

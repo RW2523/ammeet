@@ -57,3 +57,4 @@ bot-worker/recordings/*
 
 # Chrome extension build artifacts
 chrome-extension/ammeet-extension.zip
+.env.spark

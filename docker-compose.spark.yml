@@ -1,0 +1,135 @@
+# AmMeeting — production compose for a self-hosted GPU box (NVIDIA DGX Spark).
+#
+#   cp .env.spark.example .env.spark   # then edit SPARK_HOST + secrets
+#   docker compose -f docker-compose.spark.yml --env-file .env.spark up -d --build
+#
+# Differences from the dev docker-compose.yml:
+#   - backend runs migrations then uvicorn WITHOUT --reload, no source mount
+#   - frontend gets NEXT_PUBLIC_API_URL as a BUILD arg (it's inlined at build time)
+#   - ollama serves a local LLM on the GPU (fully-private AI)
+#   - optional `stt` profile: local OpenAI-compatible Whisper server on the GPU
+#
+# Everything is multi-arch (arm64-ready) except the optional STT image — see
+# docs/DEPLOY-DGX-SPARK.md for the fallback if it lacks an arm64+CUDA build.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ammeet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.spark}
+      POSTGRES_DB: ammeet
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ammeet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env.spark
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ammeet:${POSTGRES_PASSWORD}@db:5432/ammeet
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_URL: http://${SPARK_HOST:?set SPARK_HOST in .env.spark}:3000
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ENVIRONMENT: production
+    command: >
+      sh -c "python -m alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://${SPARK_HOST}:8000
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  # Local LLM on the Spark's GPU. After first start, pull models once:
+  #   docker compose -f docker-compose.spark.yml exec ollama ollama pull qwen2.5:14b
+  #   docker compose -f docker-compose.spark.yml exec ollama ollama pull nomic-embed-text
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # OPTIONAL local Whisper STT (OpenAI-compatible /v1/audio/transcriptions).
+  # Enable with: --profile stt   and set in .env.spark:
+  #   STT_PROVIDER=whisper
+  #   WHISPER_BASE_URL=http://stt:8000/v1
+  # Captions-based capture needs NO STT at all — this only powers audio uploads
+  # and the extension's "Participants" tab-audio transcription.
+  stt:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    profiles: ["stt"]
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - sttmodels:/home/ubuntu/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Self-hosted meeting bot (dev/Jitsi sandbox) — unchanged, still optional.
+  bot-worker:
+    build:
+      context: ./bot-worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles: ["bots"]
+    ports:
+      - "4500:4500"
+    shm_size: "1gb"
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
+  ollama:
+  sttmodels:
