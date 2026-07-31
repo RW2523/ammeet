@@ -26,6 +26,19 @@ def test_provider_catalog_has_four_providers():
     assert ids == {"openai", "anthropic", "gemini", "openrouter"}
 
 
+def test_env_fallback_respects_llm_base_url(monkeypatch):
+    # With no UI/DB config, LLM_BASE_URL must reach the built provider so a
+    # local OpenAI-compatible server (Ollama) works with zero user setup.
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "llm_base_url", "http://ollama:11434/v1")
+    cfg = get_active_config()
+    assert cfg["base_url"] == "http://ollama:11434/v1"
+    llm = _build_provider(cfg)
+    assert isinstance(llm, OpenAICompatProvider)
+    assert str(llm._client.base_url).rstrip("/") == "http://ollama:11434/v1"
+
+
 @pytest.mark.asyncio
 async def test_non_embedding_providers_raise_on_embed():
     # OpenRouter / Anthropic don't support embeddings — embed() must raise so callers

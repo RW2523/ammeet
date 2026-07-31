@@ -96,7 +96,7 @@ def _env_config() -> dict[str, Any]:
         "api_key": api_key,
         "model": s.llm_model or DEFAULT_MODELS.get(provider, "gpt-4o"),
         "embedding_model": s.embedding_model or DEFAULT_EMBEDDING_MODELS.get(provider, ""),
-        "base_url": None,
+        "base_url": s.llm_base_url or None,
     }
 
 

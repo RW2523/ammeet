@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     llm_provider: Literal["openai", "anthropic"] = "openai"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    # OpenAI-compatible base URL for the env-fallback LLM config (e.g. a local
+    # Ollama server: http://ollama:11434/v1). Empty = the provider's default.
+    llm_base_url: str = ""
     llm_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"
 
