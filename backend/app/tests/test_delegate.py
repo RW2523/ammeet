@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import delete, select
 
 from app.models.delegate import DelegateSession
@@ -72,6 +74,32 @@ def _seg(speaker: str, text: str, ts: int = 1000, final: bool = True) -> Transcr
     return TranscriptSegment(speaker=speaker, text=text, timestamp_ms=ts, is_final=final)
 
 
+@pytest_asyncio.fixture
+async def delegate_ws(db_session):
+    """Throwaway workspace for direct-drive agent tests: the agent COMMITS at every
+    milestone, so these tests use a unique-slug workspace and delete their committed
+    rows afterwards to preserve the suite's rollback isolation."""
+    ws = Workspace(name="Delegate WS", slug=f"delegate-{uuid.uuid4().hex[:10]}")
+    db_session.add(ws)
+    await db_session.flush()
+    wid = ws.id
+    yield ws
+    await db_session.rollback()
+    await db_session.execute(delete(AuditLog).where(AuditLog.workspace_id == wid))
+    await db_session.execute(delete(Workspace).where(Workspace.id == wid))
+    await db_session.commit()
+
+
+async def _read_row(session_id: str) -> DelegateSession | None:
+    """Read the session row through a SECOND, fresh DB session (commit visibility)."""
+    from app.tests.conftest import TestSession
+
+    async with TestSession() as other:
+        return (await other.execute(
+            select(DelegateSession).where(DelegateSession.id == session_id)
+        )).scalar_one_or_none()
+
+
 async def _make_agent(db, workspace, stage: str, owner: str = "Alex Example"):
     meeting = Meeting(
         workspace_id=workspace.id,
@@ -133,9 +161,9 @@ async def _audit_rows(db, session_id: str, action: str) -> list[AuditLog]:
 
 
 @pytest.mark.asyncio
-async def test_stage_a_discloses_records_and_reports(db_session, test_workspace, monkeypatch):
+async def test_stage_a_discloses_records_and_reports(db_session, delegate_ws, monkeypatch):
     _patch_report_llm(monkeypatch)
-    meeting, session, agent = await _make_agent(db_session, test_workspace, "silent")
+    meeting, session, agent = await _make_agent(db_session, delegate_ws, "silent")
 
     events = await _drive(agent, [
         _seg("Sarah Chen", "Welcome everyone, let's start."),
@@ -170,7 +198,7 @@ async def test_stage_a_discloses_records_and_reports(db_session, test_workspace,
 
     usage = (await db_session.execute(
         select(UsageRecord).where(
-            UsageRecord.workspace_id == test_workspace.id,
+            UsageRecord.workspace_id == delegate_ws.id,
             UsageRecord.metric == "delegate_sessions",
         )
     )).scalar_one()
@@ -178,12 +206,12 @@ async def test_stage_a_discloses_records_and_reports(db_session, test_workspace,
 
 
 @pytest.mark.asyncio
-async def test_stage_a_with_tts_none_still_audits_disclosure(db_session, test_workspace, monkeypatch):
+async def test_stage_a_with_tts_none_still_audits_disclosure(db_session, delegate_ws, monkeypatch):
     _patch_report_llm(monkeypatch)
     from app.core.config import get_settings
 
     monkeypatch.setattr(get_settings(), "tts_provider", "none")
-    _, session, agent = await _make_agent(db_session, test_workspace, "silent")
+    _, session, agent = await _make_agent(db_session, delegate_ws, "silent")
 
     await _drive(agent, [_seg("Sarah Chen", "Quick sync today.")])
 
@@ -199,21 +227,21 @@ async def test_stage_a_with_tts_none_still_audits_disclosure(db_session, test_wo
 
 
 @pytest.mark.asyncio
-async def test_stage_b_delivers_script_and_captures_follow_ups(db_session, test_workspace, monkeypatch):
+async def test_stage_b_delivers_script_and_captures_follow_ups(db_session, delegate_ws, monkeypatch):
     _patch_report_llm(monkeypatch)
-    meeting, session, agent = await _make_agent(db_session, test_workspace, "briefed", owner="Alex Example")
+    meeting, session, agent = await _make_agent(db_session, delegate_ws, "briefed", owner="Alex Example")
 
     db_session.add_all([
-        SpeakingPoint(meeting_id=meeting.id, workspace_id=test_workspace.id,
+        SpeakingPoint(meeting_id=meeting.id, workspace_id=delegate_ws.id,
                       text="Ship date moved to Friday.", priority="must", order_index=2),
-        SpeakingPoint(meeting_id=meeting.id, workspace_id=test_workspace.id,
+        SpeakingPoint(meeting_id=meeting.id, workspace_id=delegate_ws.id,
                       text="Design review is complete.", priority="should", order_index=1),
-        SpeakingPoint(meeting_id=meeting.id, workspace_id=test_workspace.id,
+        SpeakingPoint(meeting_id=meeting.id, workspace_id=delegate_ws.id,
                       text="We hired a new tester.", priority="nice", order_index=3),
     ])
-    q_allowed = Question(meeting_id=meeting.id, workspace_id=test_workspace.id,
+    q_allowed = Question(meeting_id=meeting.id, workspace_id=delegate_ws.id,
                          text="What is blocking the launch?", proxy_allowed=True)
-    q_private = Question(meeting_id=meeting.id, workspace_id=test_workspace.id,
+    q_private = Question(meeting_id=meeting.id, workspace_id=delegate_ws.id,
                          text="Internal-only question.", proxy_allowed=False)
     db_session.add_all([q_allowed, q_private])
     await db_session.flush()
@@ -261,9 +289,9 @@ async def test_stage_b_delivers_script_and_captures_follow_ups(db_session, test_
 
 
 @pytest.mark.asyncio
-async def test_kill_switch_ejects_the_delegate(db_session, test_workspace, monkeypatch):
+async def test_kill_switch_ejects_the_delegate(db_session, delegate_ws, monkeypatch):
     _patch_report_llm(monkeypatch)
-    _, session, agent = await _make_agent(db_session, test_workspace, "silent")
+    _, session, agent = await _make_agent(db_session, delegate_ws, "silent")
 
     events = await _drive(agent, [
         _seg("Sarah Chen", "Please DROP the bot right now."),
@@ -278,6 +306,105 @@ async def test_kill_switch_ejects_the_delegate(db_session, test_workspace, monke
     assert agent._bot_provider.left  # provider.leave_meeting was called
     status_events = [e for e in events if e["type"] == "delegate_status"]
     assert any(e.get("reason") == "kill_switch" for e in status_events)
+
+
+# ── Live-run defect regressions ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_status_committed_mid_run_visible_from_second_session(db_session, delegate_ws, monkeypatch):
+    """Defect 1: milestone commits — a second DB session must see joining/active
+    state (and bot_id + disclosure timestamp) WHILE the agent is still running."""
+    _patch_report_llm(monkeypatch)
+    _, session, agent = await _make_agent(db_session, delegate_ws, "silent")
+    events: list[dict[str, Any]] = []
+
+    async def _consume() -> None:
+        async for e in agent.run():
+            events.append(e)
+
+    task = asyncio.create_task(_consume())
+    row = None
+    for _ in range(200):
+        row = await _read_row(session.id)
+        if row is not None and row.status == "active" and row.disclosure_logged_at is not None:
+            break
+        await asyncio.sleep(0.05)
+
+    assert row is not None
+    assert row.status == "active"           # mid-run, from another session
+    assert row.bot_id                        # committed right after create_bot
+    assert row.disclosure_logged_at is not None
+    assert not task.done()                   # the agent is still live
+
+    agent.stop()
+    await asyncio.wait_for(task, timeout=30)
+    row = await _read_row(session.id)
+    assert row.status == "done" and row.ended_at is not None
+
+
+@pytest.mark.asyncio
+async def test_tts_none_sends_no_audio_to_bot(db_session, delegate_ws, monkeypatch):
+    """Defect 2: with TTS_PROVIDER=none no bytes may ever reach provider.output_audio."""
+    _patch_report_llm(monkeypatch)
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "tts_provider", "none")
+    _, session, agent = await _make_agent(db_session, delegate_ws, "silent")
+
+    events = await _drive(agent, [_seg("Sarah Chen", "Quick update from me.")])
+
+    assert agent._bot_provider.audio_out == []   # nothing shipped to the bot
+    assert agent._tts.spoken == []               # not even synthesized
+    assert not [e for e in events if e["type"] == "tts_audio"]
+    utterances = await _audit_rows(db_session, session.id, "delegate.utterance")
+    assert json.loads(utterances[0].detail)["tts"] == "tts_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_provider_status_failures_mark_session_error(db_session, delegate_ws, monkeypatch):
+    """Defect 3: repeated provider failures during join must terminate the session
+    with a persisted error state and a cleaned registry — never poll forever."""
+    from app.tests.conftest import TestSession
+
+    class _BrokenStatusProvider(MockMeetingBotProvider):
+        async def get_bot_status(self, bot_id: str):
+            raise RuntimeError("worker returned 404: bot no longer exists")
+
+    monkeypatch.setattr(de, "AsyncSessionLocal", TestSession)
+    monkeypatch.setattr(de, "get_bot_provider", lambda: _BrokenStatusProvider())
+    monkeypatch.setattr(de, "_JOIN_POLL_SECONDS", 0.01)
+    published: list[dict[str, Any]] = []
+
+    async def _fake_publish(channel: str, payload: dict) -> None:
+        published.append(payload)
+
+    monkeypatch.setattr(de, "publish_event", _fake_publish)
+
+    meeting = Meeting(workspace_id=delegate_ws.id, title="Broken worker", mode=MeetingMode.PROXY,
+                      proxy_consent_given=True, meeting_url="https://zoom.us/j/broken")
+    db_session.add(meeting)
+    await db_session.flush()
+    session = DelegateSession(meeting_id=meeting.id, workspace_id=delegate_ws.id,
+                              stage="silent", consent_recorded_at=datetime.now(UTC))
+    db_session.add(session)
+    await db_session.commit()  # the background runner reads through its own session
+
+    await de.launch_delegate(session_id=session.id, meeting_id=meeting.id,
+                             workspace_id=delegate_ws.id, owner_name="Owner")
+
+    row = None
+    for _ in range(300):
+        row = await _read_row(session.id)
+        if row is not None and row.status == "error":
+            break
+        await asyncio.sleep(0.05)
+
+    assert row is not None and row.status == "error"
+    assert row.error_detail and "status unavailable" in row.error_detail
+    assert row.ended_at is not None
+    assert de.get_active_delegate(meeting.id) is None  # registry cleaned
+    assert any(e.get("type") == "delegate_status" and e.get("status") == "error" for e in published)
 
 
 # ── Router: gates and shapes ───────────────────────────────────────────────
