@@ -26,23 +26,31 @@ from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 from app.core.redis import publish_event
-from app.models.delegate import DelegateSession, DelegateSessionStatus, DelegateStage
+from app.models.delegate import (
+    ApprovalRequest,
+    ApprovalStatus,
+    DelegateSession,
+    DelegateSessionStatus,
+    DelegateStage,
+)
 from app.models.meeting import Meeting, Question, QuestionStatus
 from app.models.meeting_bot import BotStatus, MeetingBot
 from app.models.speaking import PointPriority, PointStatus, SpeakingPoint
 from app.models.user import AuditLog, Workspace
 from app.services.billing import check_and_increment_usage
-from app.services.escalation import is_restricted_topic
+from app.services.escalation import classify_escalation, is_restricted_topic
+from app.services.knowledge_rag import answer_from_knowledge
 from app.services.llm import get_llm
 from app.services.meeting_bot import get_bot_provider
 from app.services.meeting_bot.base import BotInfo, TranscriptSegment
+from app.services.notify import get_notifier
 from app.services.report_generator import generate_report
 from app.services.tts import MockTTSProvider, get_tts
 
@@ -90,6 +98,7 @@ class DelegateAgent:
         self._bot_provider = get_bot_provider()
         self._tts = get_tts()
         self._llm = get_llm()
+        self._notifier = get_notifier()
         self._bot_info: BotInfo | None = None
         self._db_bot: MeetingBot | None = None
 
@@ -245,8 +254,8 @@ class DelegateAgent:
         async for ev in self._say(disclosure):
             yield ev
 
-        # 3. Stage B only: deliver the pre-approved script, then go silent
-        if self._stage == DelegateStage.BRIEFED.value:
+        # 3. Stages B/C: deliver the pre-approved script, then listen
+        if self._stage in (DelegateStage.BRIEFED.value, DelegateStage.INTERACTIVE.value):
             async for ev in self._deliver_script():
                 yield ev
             if self._killed:
@@ -276,7 +285,10 @@ class DelegateAgent:
 
             yield {"type": "transcript", "speaker": segment.speaker, "text": segment.text, "is_final": segment.is_final}
 
-            if self._stage == DelegateStage.BRIEFED.value and segment.is_final:
+            if (
+                self._stage in (DelegateStage.BRIEFED.value, DelegateStage.INTERACTIVE.value)
+                and segment.is_final
+            ):
                 async for ev in self._maybe_capture_follow_up(segment):
                     yield ev
 
@@ -348,7 +360,7 @@ class DelegateAgent:
             self._incoming.put_nowait(seg)
         return False
 
-    # ── Follow-up capture (stage B, after the script) ───────────────────────
+    # ── Owner-directed questions (stages B and C, after the script) ─────────
 
     async def _maybe_capture_follow_up(self, segment: TranscriptSegment) -> AsyncGenerator[dict[str, Any], None]:
         text = segment.text
@@ -374,21 +386,157 @@ class DelegateAgent:
         if not directed:
             return
 
-        entry = {"asker": segment.speaker, "text": text, "ts": segment.timestamp_ms}
+        if self._stage == DelegateStage.INTERACTIVE.value:
+            async for ev in self._handle_interactive_question(segment):
+                yield ev
+            return
+
+        # Stage B: the delegate NEVER answers — file a follow-up for the owner.
+        async for ev in self._file_follow_up(segment):
+            yield ev
+        if is_restricted_topic(text):
+            async for ev in self._speak_never_commit():
+                yield ev
+
+    async def _file_follow_up(self, segment: TranscriptSegment) -> AsyncGenerator[dict[str, Any], None]:
+        entry = {"asker": segment.speaker, "text": segment.text, "ts": segment.timestamp_ms}
         self._follow_ups.append(entry)
         self._session.follow_ups_json = json.dumps(self._follow_ups)
         await self._db.commit()
         yield {"type": "delegate_follow_up", **entry}
 
-        # The delegate NEVER answers (that's stage C). If directly pressed on a
-        # restricted topic it may speak the hard-coded deferral once per meeting.
-        if not self._never_commit_used and is_restricted_topic(text):
-            self._never_commit_used = True
-            line = NEVER_COMMIT_LINE.format(owner=self._owner)
-            await self._audit_utterance(line, kind="never_commit")
-            yield {"type": "delegate_reply", "text": line}
-            async for ev in self._say(line):
+    async def _speak_never_commit(self) -> AsyncGenerator[dict[str, Any], None]:
+        """The hard-coded deferral when pressed on a restricted topic — once per meeting."""
+        if self._never_commit_used:
+            return
+        self._never_commit_used = True
+        line = NEVER_COMMIT_LINE.format(owner=self._owner)
+        await self._audit_utterance(line, kind="never_commit")
+        yield {"type": "delegate_reply", "text": line}
+        async for ev in self._say(line):
+            yield ev
+
+    # ── Stage C: KB-grounded answers behind a human approval gate ───────────
+
+    async def _handle_interactive_question(self, segment: TranscriptSegment) -> AsyncGenerator[dict[str, Any], None]:
+        text = segment.text
+
+        # a. Escalation gate FIRST (fail-closed) — a restricted topic never
+        # becomes an approval request; it gets the stage-B treatment.
+        restricted = is_restricted_topic(text)
+        if not restricted:
+            esc = await classify_escalation(text)
+            restricted = bool(esc.get("requires_escalation"))
+        if restricted:
+            async for ev in self._file_follow_up(segment):
                 yield ev
+            async for ev in self._speak_never_commit():
+                yield ev
+            return
+
+        # b. Propose an answer strictly from approved knowledge (injection-guarded RAG).
+        answer, chunks = "", []
+        try:
+            answer, chunks = await answer_from_knowledge(self._db, self._meeting.workspace_id, text)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("KB answer generation failed for session %s: %s", self._session.id, exc)
+        if not chunks or not (answer or "").strip():
+            async for ev in self._file_follow_up(segment):
+                yield ev
+            return
+
+        # c. Approval request: persist, audit, notify the owner.
+        request = ApprovalRequest(
+            delegate_session_id=self._session.id,
+            meeting_id=self._meeting.id,
+            workspace_id=self._meeting.workspace_id,
+            question_text=text,
+            proposed_answer=answer,
+            sources_json=json.dumps(
+                [{"chunk_id": c.id, "source_type": c.source_type, "meeting_id": c.meeting_id} for c in chunks]
+            ),
+            channel="ntfy" if self._settings.approval_notify_provider == "ntfy" else "web",
+        )
+        self._db.add(request)
+        await self._db.flush()
+        self._db.add(AuditLog(
+            workspace_id=self._meeting.workspace_id,
+            user_id=self._session.created_by_id,
+            action="delegate.approval_requested",
+            resource_type="approval_request",
+            resource_id=request.id,
+            detail=json.dumps({"question": text[:500], "proposed_answer": answer[:500]}),
+        ))
+        await self._db.commit()
+        yield {
+            "type": "approval_request",
+            "request_id": request.id,
+            "question": text,
+            "proposed_answer": answer,
+        }
+        try:
+            await self._notifier.send(
+                title=f"Approval needed: {self._owner}'s delegate",
+                body=f"Q: {text}\nProposed answer: {answer[:400]}",
+                click_url=f"{self._settings.frontend_url.rstrip('/')}/workspaces/{self._meeting.workspace_id}/approvals",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Approval notification failed (non-fatal): %s", exc)
+
+        # d. Wait for the human. The decision endpoint may run in another worker
+        # process, so wait on the COMMITTED row (1s poll), never in-memory state.
+        decision = await self._wait_for_decision(request.id)
+
+        # e. Approved → speak the approved text; anything else → SILENCE.
+        if decision == ApprovalStatus.APPROVED.value:
+            await self._audit_utterance(answer, kind="approved_answer")
+            yield {"type": "delegate_reply", "kind": "approved_answer", "request_id": request.id, "text": answer}
+            async for ev in self._say(answer):
+                yield ev
+            return
+        if decision == ApprovalStatus.TIMEOUT.value:
+            self._db.add(AuditLog(
+                workspace_id=self._meeting.workspace_id,
+                user_id=self._session.created_by_id,
+                action="delegate.approval_timeout",
+                resource_type="approval_request",
+                resource_id=request.id,
+                detail=f"no decision within {self._settings.approval_timeout_seconds}s — stayed silent",
+            ))
+            await self._db.commit()
+        async for ev in self._file_follow_up(segment):
+            yield ev
+
+    async def _wait_for_decision(self, request_id: str) -> str:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(1, self._settings.approval_timeout_seconds)
+        while loop.time() < deadline and not self._stop.is_set():
+            await asyncio.sleep(min(1.0, max(0.05, deadline - loop.time())))
+            if await self._drain_for_kill():  # the kill switch cuts the wait short
+                break
+            row = (await self._db.execute(
+                select(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            if row is not None and row.status != ApprovalStatus.PENDING.value:
+                return row.status
+        # Window closed: flip to timeout — but only if no decision landed in the race.
+        result = await self._db.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id, ApprovalRequest.status == ApprovalStatus.PENDING.value)
+            .values(status=ApprovalStatus.TIMEOUT.value)
+        )
+        await self._db.commit()
+        if result.rowcount == 0:
+            row = (await self._db.execute(
+                select(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            if row is not None and row.status in (ApprovalStatus.APPROVED.value, ApprovalStatus.DECLINED.value):
+                return row.status
+        return ApprovalStatus.TIMEOUT.value
 
     # ── Kill switch ─────────────────────────────────────────────────────────
 
