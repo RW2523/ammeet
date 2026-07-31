@@ -18,13 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_workspace_role
-from app.models.meeting import ContextSource, Meeting, Report
+from app.core.logging import get_logger
+from app.models.meeting import ActionItem, ContextSource, Decision, Meeting, Question, QuestionStatus, Report
 from app.models.speaking import PointStatus, SpeakingPoint, SpeakingResponse
 from app.models.user import User, Workspace, WorkspaceRole
-from app.services import speak_coverage
+from app.services import commitments, nudge_matcher, speak_coverage
 from app.services.billing import check_and_increment_usage
+from app.services.open_items import persist_open_items
 
 router = APIRouter()
+_logger = get_logger(__name__)
 
 
 async def _meeting_or_404(db: AsyncSession, workspace_id: str, meeting_id: str) -> Meeting:
@@ -229,8 +232,55 @@ async def ingest(
         ))
     await db.flush()
 
+    # Live memory nudges: check the fresh chunk against open items from OTHER
+    # meetings + recorded decisions. Skipped entirely when there is no memory,
+    # so the extra LLM call only happens when it can pay off.
+    nudges: list[dict[str, Any]] = []
+    if transcript_text.strip():
+        open_actions = (await db.execute(
+            select(ActionItem)
+            .join(Meeting, ActionItem.meeting_id == Meeting.id)
+            .where(
+                Meeting.workspace_id == workspace_id,
+                ActionItem.meeting_id != meeting_id,
+                ActionItem.status == "open",
+            )
+            .order_by(ActionItem.created_at.desc())
+            .limit(20)
+        )).scalars().all()
+        open_questions = (await db.execute(
+            select(Question)
+            .join(Meeting, Question.meeting_id == Meeting.id)
+            .where(
+                Meeting.workspace_id == workspace_id,
+                Question.meeting_id != meeting_id,
+                Question.status.in_([QuestionStatus.PENDING, QuestionStatus.ASKED]),
+            )
+            .order_by(Question.created_at.desc())
+            .limit(10)
+        )).scalars().all()
+        recent_decisions = (await db.execute(
+            select(Decision)
+            .join(Meeting, Decision.meeting_id == Meeting.id)
+            .where(Meeting.workspace_id == workspace_id)
+            .order_by(Decision.created_at.desc())
+            .limit(15)
+        )).scalars().all()
+        open_items = [
+            {"id": a.id, "kind": a.kind, "text": a.title, "owner": a.owner} for a in open_actions
+        ] + [
+            {"id": q.id, "kind": "question", "text": q.text, "owner": None} for q in open_questions
+        ]
+        if open_items or recent_decisions:
+            nudges = await nudge_matcher.match_nudges(
+                open_items,
+                [{"id": d.id, "text": d.text, "made_by": d.made_by} for d in recent_decisions],
+                transcript_text,
+            )
+
     state = await _state(db, meeting_id)
     state["newly_covered"] = newly_covered
+    state["nudges"] = nudges
     return state
 
 
@@ -262,6 +312,23 @@ async def finalize(
     summary = await speak_coverage.summarize_session(
         covered, missed, [{"kind": r.kind, "text": r.text} for r in resps]
     )
+
+    # Wrap-time memory: turn what was actually said into queryable rows
+    # (commitments, actions, decisions, carryover questions). The raw ingested
+    # lines are not stored, so rebuild the transcript from the coverage evidence
+    # and the captured responses. Extraction never raises; a persistence hiccup
+    # must not break the wrap either.
+    owner_name = user.full_name or user.email
+    transcript_lines = [f"{owner_name}: {p.covered_by_text}" for p in pts if p.covered_by_text]
+    transcript_lines += [f"{r.speaker}: {r.text}" for r in resps]
+    try:
+        extracted = await commitments.extract_open_items("\n".join(transcript_lines), owner_name)
+        await persist_open_items(
+            db, meeting_id, workspace_id, extracted,
+            source_context="speak_wrap", question_source_context="carryover",
+        )
+    except Exception as exc:
+        _logger.warning("Speak wrap open-item persistence failed: %s", exc)
 
     report = Report(
         meeting_id=meeting_id, workspace_id=workspace_id,

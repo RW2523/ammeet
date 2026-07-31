@@ -13,7 +13,8 @@ import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
 import {
   ArrowLeft, Upload, Zap, FileText, CheckCircle, AlertTriangle,
-  Clock, User, Target, RefreshCw, Send, Shield, Bot, Eye
+  Clock, User, Target, RefreshCw, Send, Shield, Bot, Eye,
+  History, HelpCircle
 } from "lucide-react";
 import Link from "next/link";
 import type { PrepBrief, Question, ProxyEvent, Report } from "@/lib/types";
@@ -275,6 +276,54 @@ export default function MeetingPage() {
                     </CardHeader>
                     <CardContent>
                       <p className="text-slate-300 text-sm leading-relaxed">{prepBrief.previous_summary}</p>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* R1 "Remember": commitments made in earlier meetings */}
+                {(prepBrief.commitments?.length ?? 0) > 0 && (
+                  <Card className="bg-slate-900 border-slate-800">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-white text-sm flex items-center gap-2">
+                        <History className="h-4 w-4 text-amber-400" /> You Promised Last Time
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      {prepBrief.commitments.map((c) => (
+                        <div key={c.id} className="border border-slate-800 rounded-lg p-3">
+                          <p className="text-sm text-slate-300">{c.title}</p>
+                          <div className="flex items-center gap-3 mt-1 flex-wrap text-xs text-slate-500">
+                            {c.owner && <span>Owner: {c.owner}</span>}
+                            {c.deadline && <span>Due: {c.deadline}</span>}
+                          </div>
+                          <p className="text-xs text-slate-500 mt-1">
+                            From: {c.meeting_title}
+                            {c.meeting_date ? ` · ${new Date(c.meeting_date).toLocaleDateString()}` : ""}
+                          </p>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* R1 "Remember": questions left unanswered in earlier meetings */}
+                {(prepBrief.open_questions?.length ?? 0) > 0 && (
+                  <Card className="bg-slate-900 border-slate-800">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-white text-sm flex items-center gap-2">
+                        <HelpCircle className="h-4 w-4 text-blue-400" /> Still Unanswered
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      {prepBrief.open_questions.map((q) => (
+                        <div key={q.id} className="flex items-start gap-2">
+                          <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-2 flex-shrink-0" />
+                          <div>
+                            <p className="text-sm text-slate-300">{q.text}</p>
+                            <p className="text-xs text-slate-500 mt-0.5">From: {q.meeting_title}</p>
+                          </div>
+                        </div>
+                      ))}
                     </CardContent>
                   </Card>
                 )}

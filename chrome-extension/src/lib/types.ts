@@ -150,6 +150,21 @@ export interface SpeakState {
   newly_covered?: string[];
 }
 
+// R1 "Remember": live nudges surfaced by the ingest endpoint while speaking.
+export type SpeakNudgeKind = "promise" | "unanswered" | "conflict";
+
+export interface SpeakNudge {
+  kind: SpeakNudgeKind;
+  item_id: string | null;
+  text: string;
+  evidence: string;
+}
+
+/** `POST .../speak/ingest` response: coverage state + any newly detected nudges. */
+export interface SpeakIngestResponse extends SpeakState {
+  nudges: SpeakNudge[];
+}
+
 export interface SpeakSummary {
   summary: string;
   covered: string[];

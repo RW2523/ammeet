@@ -135,6 +135,7 @@ class ActionItemOut(BaseModel):
     owner: str | None
     deadline: str | None
     status: str
+    kind: str
     jira_ticket_ref: str | None
     created_at: datetime
 
@@ -164,11 +165,30 @@ class RiskOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PrepCommitmentOut(BaseModel):
+    """An open commitment carried over from a previous meeting ("you promised X")."""
+
+    id: str
+    title: str
+    owner: str | None
+    deadline: str | None
+    meeting_title: str
+    meeting_date: datetime | None
+
+
+class PrepOpenQuestionOut(BaseModel):
+    id: str
+    text: str
+    meeting_title: str
+
+
 class PrepBriefOut(BaseModel):
     meeting: MeetingOut
     attendees: list[dict]
     previous_summary: str | None
     open_action_items: list[ActionItemOut]
+    commitments: list[PrepCommitmentOut]
+    open_questions: list[PrepOpenQuestionOut]
     pending_jira_tickets: list[dict]
     risks: list[RiskOut]
     suggested_questions: list[QuestionOut]

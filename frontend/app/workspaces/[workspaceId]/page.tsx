@@ -8,7 +8,7 @@ import { useWorkspaceStore } from "@/lib/store";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Calendar, Users, Plus, ArrowRight, Zap } from "lucide-react";
+import { Calendar, Users, Plus, ArrowRight, Zap, ClipboardList } from "lucide-react";
 import Link from "next/link";
 
 const MODE_LABELS: Record<string, string> = {
@@ -42,6 +42,16 @@ export default function WorkspacePage() {
     queryFn: () => meetingApi.list(workspaceId),
   });
 
+  // R1 "Remember": workspace-wide open commitments / actions / questions.
+  const { data: openItems } = useQuery({
+    queryKey: ["open-items", workspaceId],
+    queryFn: () => meetingApi.getOpenItems(workspaceId),
+  });
+
+  const openItemsTotal = openItems
+    ? openItems.commitments.length + openItems.actions.length + openItems.questions.length
+    : 0;
+
   useEffect(() => {
     if (workspace) setCurrent(workspace);
   }, [workspace, setCurrent]);
@@ -66,6 +76,57 @@ export default function WorkspacePage() {
           </Link>
         </div>
       </div>
+
+      {/* R1 "Remember": open items carried over from past meetings */}
+      {openItems && openItemsTotal > 0 && (
+        <Card className="bg-slate-900 border-slate-800 mb-8">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-white text-sm flex items-center gap-2">
+              <ClipboardList className="h-4 w-4 text-amber-400" /> Open Items
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center">
+                <p className="text-2xl font-bold text-amber-300">{openItems.commitments.length}</p>
+                <p className="text-xs text-slate-400 mt-1">Commitments</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-bold text-purple-300">{openItems.actions.length}</p>
+                <p className="text-xs text-slate-400 mt-1">Actions</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-bold text-blue-300">{openItems.questions.length}</p>
+                <p className="text-xs text-slate-400 mt-1">Questions</p>
+              </div>
+            </div>
+            {openItems.commitments.length > 0 && (
+              <div className="mt-4 space-y-2">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  Top commitments
+                </p>
+                {openItems.commitments.slice(0, 3).map((c) => (
+                  <Link
+                    key={c.id}
+                    href={`/workspaces/${workspaceId}/meetings/${c.meeting_id}`}
+                    className="flex items-center justify-between gap-4 border border-slate-800 rounded-lg p-3 hover:border-slate-700 transition-colors group"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm text-slate-300 truncate">{c.title ?? c.text}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {c.owner ? `${c.owner} · ` : ""}
+                        {c.meeting_title}
+                        {c.deadline ? ` · due ${c.deadline}` : ""}
+                      </p>
+                    </div>
+                    <ArrowRight className="h-4 w-4 text-slate-600 group-hover:text-slate-300 transition-colors flex-shrink-0" />
+                  </Link>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Meetings */}
       <div>

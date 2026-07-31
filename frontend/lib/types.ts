@@ -123,6 +123,23 @@ export interface Report {
   created_at: string;
 }
 
+// R1 "Remember": commitments you made in earlier meetings, surfaced pre-meeting.
+export interface PrepCommitment {
+  id: string;
+  title: string;
+  owner: string | null;
+  deadline: string | null;
+  meeting_title: string;
+  meeting_date: string | null;
+}
+
+// R1 "Remember": questions raised in earlier meetings that never got answered.
+export interface PrepOpenQuestion {
+  id: string;
+  text: string;
+  meeting_title: string;
+}
+
 export interface PrepBrief {
   meeting: Meeting;
   attendees: Array<{ name: string; role?: string; email?: string }>;
@@ -138,6 +155,29 @@ export interface PrepBrief {
   risks: Array<{ id: string; text: string; severity: string }>;
   suggested_questions: Question[];
   suggested_agenda: string[];
+  commitments: PrepCommitment[];
+  open_questions: PrepOpenQuestion[];
+}
+
+// R1 "Remember": workspace-wide open items (GET /workspaces/{id}/open-items).
+// Commitments and actions carry `title`; questions carry `text`.
+export interface OpenItem {
+  id: string;
+  title?: string;
+  text?: string;
+  owner: string | null;
+  deadline: string | null;
+  status: string;
+  meeting_id: string;
+  meeting_title: string;
+  meeting_date: string | null;
+  source_context: string | null;
+}
+
+export interface OpenItems {
+  commitments: OpenItem[];
+  actions: OpenItem[];
+  questions: OpenItem[];
 }
 
 export interface ProxyEvent {

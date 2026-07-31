@@ -1,5 +1,5 @@
 import { api } from "./api";
-import type { ActionItem, CalendarEvent, Meeting, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
+import type { ActionItem, CalendarEvent, Meeting, OpenItems, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
 
 // Auth
 export const authApi = {
@@ -151,6 +151,9 @@ export const meetingApi = {
   },
   getPrepBrief: (workspaceId: string, meetingId: string) =>
     api.get<PrepBrief>(`/workspaces/${workspaceId}/meetings/${meetingId}/prep-brief`).then((r) => r.data),
+  /** R1 "Remember": workspace-wide open commitments / actions / questions. */
+  getOpenItems: (workspaceId: string) =>
+    api.get<OpenItems>(`/workspaces/${workspaceId}/open-items`).then((r) => r.data),
   generateQuestions: (workspaceId: string, meetingId: string) =>
     api.post<{ generated: number }>(`/workspaces/${workspaceId}/meetings/${meetingId}/generate-questions`).then((r) => r.data),
 };

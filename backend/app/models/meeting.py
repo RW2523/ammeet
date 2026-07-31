@@ -197,6 +197,8 @@ class ActionItem(Base):
     owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     deadline: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="open")
+    # "commitment" = a promise the session owner made; "action" = a task assigned to others
+    kind: Mapped[str] = mapped_column(String(20), default="action", server_default="action")
     jira_ticket_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_context: Mapped[str | None] = mapped_column(Text, nullable=True)
 

@@ -17,8 +17,10 @@ from app.models.meeting import (
     Report,
     Risk,
 )
+from app.services.commitments import normalize_extracted
 from app.services.integrations import get_slack
 from app.services.llm import get_llm
+from app.services.open_items import persist_open_items
 
 _logger = get_logger(__name__)
 
@@ -29,6 +31,9 @@ Based on the provided meeting data, generate:
 2. A follow-up email draft
 3. A Slack message draft (brief, 2-3 bullet points)
 4. Suggested Jira ticket updates
+5. The open items to remember: commitments the meeting owner made themselves, action
+   items assigned to others, decisions taken, and questions left unanswered. Only include
+   items actually present in the data — never invent owners or deadlines (use null).
 
 Return JSON:
 {
@@ -37,7 +42,11 @@ Return JSON:
   "email_draft": str,
   "slack_draft": str,
   "jira_suggestions": [{"ticket_key": str | null, "action": str, "notes": str}],
-  "next_meeting_agenda": [str]
+  "next_meeting_agenda": [str],
+  "commitments": [{"title": str, "owner": str | null, "deadline": str | null}],
+  "action_items": [{"title": str, "owner": str | null, "deadline": str | null}],
+  "decisions": [{"text": str, "made_by": str | null}],
+  "open_questions": [{"text": str, "asker": str | null}]
 }"""
 
 
@@ -85,6 +94,7 @@ async def generate_report(db: AsyncSession, meeting: Meeting) -> Report:
     }
 
     llm = get_llm()
+    llm_ok = True
     try:
         llm_result = await llm.complete_json(
             system=_REPORT_SYSTEM,
@@ -92,6 +102,7 @@ async def generate_report(db: AsyncSession, meeting: Meeting) -> Report:
         )
     except Exception as exc:
         _logger.error("Report generation LLM call failed: %s", exc)
+        llm_ok = False
         llm_result = {
             "summary": f"Meeting '{meeting.title}' completed. {len(answers)} questions answered, {len(action_items)} action items identified.",
             "follow_up_recommendations": ["Review open action items", "Schedule follow-up meeting"],
@@ -99,7 +110,26 @@ async def generate_report(db: AsyncSession, meeting: Meeting) -> Report:
             "slack_draft": f"Meeting summary for *{meeting.title}*:\n• {len(answers)} items answered\n• {len(action_items)} action items\n• {len(unanswered)} questions pending",
             "jira_suggestions": [],
             "next_meeting_agenda": ["Review action item progress", "Address unanswered questions"],
+            "commitments": [],
+            "open_questions": [],
         }
+
+    # Persist the extracted open items as rows (the live memory other meetings
+    # query). Only on LLM success — the fallback has no extraction, and wiping
+    # previously persisted rows on a failed regeneration would lose memory.
+    # persist_open_items replaces this source's prior rows, so regenerating a
+    # report never duplicates.
+    if llm_ok:
+        await persist_open_items(
+            db, meeting.id, meeting.workspace_id,
+            normalize_extracted({
+                "commitments": llm_result.get("commitments"),
+                "actions": llm_result.get("action_items"),
+                "decisions": llm_result.get("decisions"),
+                "open_questions": llm_result.get("open_questions"),
+            }),
+            source_context="report_wrap",
+        )
 
     full_data = {
         **meeting_data,
