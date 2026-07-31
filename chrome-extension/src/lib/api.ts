@@ -182,7 +182,7 @@ export class ApiClient {
     workspaceId: string,
     meetingId: string,
     segments: { speaker: string; text: string }[]
-  ): Promise<import("./types").SpeakState> {
+  ): Promise<import("./types").SpeakIngestResponse> {
     return this.request(`/workspaces/${workspaceId}/meetings/${meetingId}/speak/ingest`, {
       method: "POST",
       body: JSON.stringify({ segments }),

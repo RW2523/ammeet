@@ -316,11 +316,49 @@ async def get_prep_brief(
     # Open action items from previous meetings
     action_items_result = await db.execute(
         select(ActionItem)
-        .where(ActionItem.workspace_id == workspace_id, ActionItem.status == "open")
+        .where(ActionItem.workspace_id == workspace_id, ActionItem.status == "open", ActionItem.kind == "action")
         .order_by(ActionItem.created_at.desc())
         .limit(10)
     )
     open_action_items = list(action_items_result.scalars().all())
+
+    # "You promised X last time": open commitments made in OTHER meetings
+    commitments_result = await db.execute(
+        select(ActionItem, Meeting)
+        .join(Meeting, ActionItem.meeting_id == Meeting.id)
+        .where(
+            Meeting.workspace_id == workspace_id,
+            ActionItem.meeting_id != meeting.id,
+            ActionItem.status == "open",
+            ActionItem.kind == "commitment",
+        )
+        .order_by(ActionItem.created_at.desc())
+        .limit(10)
+    )
+    commitments = [
+        {
+            "id": ai.id, "title": ai.title, "owner": ai.owner, "deadline": ai.deadline,
+            "meeting_title": m.title, "meeting_date": m.ended_at or m.started_at or m.created_at,
+        }
+        for ai, m in commitments_result.all()
+    ]
+
+    # Questions left hanging in OTHER meetings
+    open_questions_result = await db.execute(
+        select(Question, Meeting)
+        .join(Meeting, Question.meeting_id == Meeting.id)
+        .where(
+            Meeting.workspace_id == workspace_id,
+            Question.meeting_id != meeting.id,
+            Question.status.in_([QuestionStatus.PENDING, QuestionStatus.ASKED]),
+        )
+        .order_by(Question.created_at.desc())
+        .limit(10)
+    )
+    open_questions = [
+        {"id": q.id, "text": q.text, "meeting_title": m.title}
+        for q, m in open_questions_result.all()
+    ]
 
     # Risks from this meeting
     risks_result = await db.execute(select(Risk).where(Risk.meeting_id == meeting.id))
@@ -349,11 +387,71 @@ async def get_prep_brief(
         "attendees": attendees,
         "previous_summary": previous_summary,
         "open_action_items": open_action_items,
+        "commitments": commitments,
+        "open_questions": open_questions,
         "pending_jira_tickets": [t for t in jira_tickets if t["status"] in ("In Progress", "Review", "To Do")][:5],
         "risks": risks,
         "suggested_questions": questions[:15],
         "suggested_agenda": suggested_agenda,
     }
+
+
+def _meeting_date(meeting: Meeting) -> str | None:
+    d = meeting.ended_at or meeting.started_at or meeting.created_at
+    return d.isoformat() if d else None
+
+
+@router.get("/{workspace_id}/open-items")
+async def list_open_items(
+    workspace_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Workspace-wide live memory: everything still open across all meetings."""
+    await require_workspace_role(workspace_id, user, db, WorkspaceRole.VIEWER)
+
+    buckets: dict[str, list[dict]] = {"commitments": [], "actions": []}
+    for kind, bucket in (("commitment", "commitments"), ("action", "actions")):
+        result = await db.execute(
+            select(ActionItem, Meeting)
+            .join(Meeting, ActionItem.meeting_id == Meeting.id)
+            .where(
+                Meeting.workspace_id == workspace_id,
+                ActionItem.status == "open",
+                ActionItem.kind == kind,
+            )
+            .order_by(ActionItem.created_at.desc())
+            .limit(100)
+        )
+        buckets[bucket] = [
+            {
+                "id": ai.id, "title": ai.title, "owner": ai.owner, "deadline": ai.deadline,
+                "status": ai.status, "meeting_id": ai.meeting_id, "meeting_title": m.title,
+                "meeting_date": _meeting_date(m), "source_context": ai.source_context,
+            }
+            for ai, m in result.all()
+        ]
+
+    questions_result = await db.execute(
+        select(Question, Meeting)
+        .join(Meeting, Question.meeting_id == Meeting.id)
+        .where(
+            Meeting.workspace_id == workspace_id,
+            Question.status.in_([QuestionStatus.PENDING, QuestionStatus.ASKED]),
+        )
+        .order_by(Question.created_at.desc())
+        .limit(100)
+    )
+    questions = [
+        {
+            "id": q.id, "text": q.text, "owner": None, "deadline": None, "status": q.status,
+            "priority": q.priority, "meeting_id": q.meeting_id, "meeting_title": m.title,
+            "meeting_date": _meeting_date(m), "source_context": q.source_context,
+        }
+        for q, m in questions_result.all()
+    ]
+
+    return {"commitments": buckets["commitments"], "actions": buckets["actions"], "questions": questions}
 
 
 @router.post("/{workspace_id}/meetings/{meeting_id}/generate-questions")

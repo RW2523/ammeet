@@ -20,6 +20,8 @@ import type {
   SessionStatus,
   SpeakState,
   SpeakSummary,
+  SpeakNudge,
+  SpeakNudgeKind,
 } from "../lib/types";
 import { ApiClient } from "../lib/api";
 import { BrowserSTT, captureTabAudio, startSegmentedRecording } from "../lib/stt";
@@ -66,6 +68,31 @@ const EVENT_COLORS: Record<string, string> = {
   info: "border-gray-600 bg-gray-800/20",
   error: "border-red-700 bg-red-900/30",
 };
+
+// R1 "Remember" nudges — per-kind label + accent (matches the event-card palette).
+const NUDGE_STYLES: Record<SpeakNudgeKind, { icon: string; label: string; box: string; labelColor: string }> = {
+  promise: {
+    icon: "🤝",
+    label: "You promised this",
+    box: "border-amber-500/60 bg-amber-900/20",
+    labelColor: "text-amber-300",
+  },
+  unanswered: {
+    icon: "❓",
+    label: "Left unanswered before",
+    box: "border-blue-500/60 bg-blue-900/20",
+    labelColor: "text-blue-300",
+  },
+  conflict: {
+    icon: "⚠️",
+    label: "Conflicts with a decision",
+    box: "border-red-500/60 bg-red-900/25",
+    labelColor: "text-red-300",
+  },
+};
+
+/** Stable dedupe key: a nudge is identified by its kind + item (or text when itemless). */
+const nudgeKey = (n: SpeakNudge) => `${n.kind}:${n.item_id ?? n.text}`;
 
 const EVENT_ICONS: Record<string, string> = {
   disclosure: "📢",
@@ -350,6 +377,9 @@ export default function SidePanel() {
   const [speakShareUrl, setSpeakShareUrl] = useState<string | null>(null);
   const speakSentIdxRef = useRef(0);
   const transcriptRef = useRef<TranscriptLine[]>([]);
+  // R1 "Remember": nudges stay pinned (deduped) until the Speak session ends.
+  const [nudges, setNudges] = useState<SpeakNudge[]>([]);
+  const nudgeKeysRef = useRef<Set<string>>(new Set());
 
   // ── Notetaker (bot-free, captures captions from this tab) ─────────────────
   const [notetakerActive, setNotetakerActive] = useState(false);
@@ -498,6 +528,29 @@ export default function SidePanel() {
           lines.map((l) => ({ speaker: l.speaker, text: l.text }))
         );
         setSpeakState(st);
+        // Merge new nudges: dedupe by (kind, item_id ?? text) so a shown nudge
+        // never flickers or re-adds; newest first, capped at 8.
+        const fresh = (st.nudges ?? []).filter((n) => {
+          const key = nudgeKey(n);
+          if (nudgeKeysRef.current.has(key)) return false;
+          nudgeKeysRef.current.add(key);
+          return true;
+        });
+        if (fresh.length > 0) {
+          setNudges((prev) => [...fresh, ...prev].slice(0, 8));
+          // A conflict warrants an OS notification — once per key (same dedupe).
+          for (const n of fresh) {
+            if (n.kind === "conflict") {
+              chrome.notifications?.create({
+                type: "basic",
+                iconUrl: chrome.runtime.getURL("icons/icon48.png"),
+                title: "⚠️ AmMeeting — Conflicts with a decision",
+                message: n.text.slice(0, 120),
+                priority: 2,
+              });
+            }
+          }
+        }
       } catch {
         /* keep the session going; retry next tick */
       }
@@ -871,6 +924,8 @@ export default function SidePanel() {
     }
     // Only track speech from now on. Start caption capture (feeds the transcript stream).
     speakSentIdxRef.current = transcriptRef.current.length;
+    setNudges([]);
+    nudgeKeysRef.current.clear();
     sendSW({ type: "START_NOTETAKER", workspaceId: selectedWorkspace, meetingId: selectedMeeting });
     setSpeakActive(true);
     addEvent({ type: "info", text: "Speak Mode on — turn on captions (CC); points tick off as you cover them." });
@@ -879,6 +934,9 @@ export default function SidePanel() {
   const finishSpeak = async () => {
     setSpeakActive(false);
     setSpeakShareUrl(null);
+    // Session over — nudges only live for the duration of the Speak session.
+    setNudges([]);
+    nudgeKeysRef.current.clear();
     sendSW({ type: "STOP_NOTETAKER", workspaceId: selectedWorkspace, meetingId: selectedMeeting });
     if (!selectedWorkspace || !selectedMeeting || !auth.accessToken) return;
     setSpeakBusy(true);
@@ -1279,7 +1337,7 @@ export default function SidePanel() {
                     {speakActive && <span className="text-green-400 text-[11px] animate-pulse">● tracking</span>}
                     <Btn
                       variant="ghost"
-                      onClick={() => { setSpeakState(null); setSpeakInput(""); setSpeakSummary(null); setSpeakActive(false); setSpeakShareUrl(null); }}
+                      onClick={() => { setSpeakState(null); setSpeakInput(""); setSpeakSummary(null); setSpeakActive(false); setSpeakShareUrl(null); setNudges([]); nudgeKeysRef.current.clear(); }}
                       className="ml-auto"
                     >
                       ↺ New
@@ -1292,6 +1350,27 @@ export default function SidePanel() {
                     <div className="mt-2"><CaptionHelp platform={detectedMeeting?.platform} /></div>
                   )}
                 </Section>
+
+                {nudges.length > 0 && (
+                  <Section title={`Nudges (${nudges.length})`}>
+                    <div className="space-y-1.5">
+                      {nudges.map((n) => {
+                        const s = NUDGE_STYLES[n.kind];
+                        return (
+                          <div key={nudgeKey(n)} className={clsx("rounded-lg p-2 border-l-2 text-[12px]", s.box)}>
+                            <p className={clsx("text-[10px] font-semibold uppercase tracking-wide mb-0.5", s.labelColor)}>
+                              {s.icon} {s.label}
+                            </p>
+                            <p className="text-gray-200 leading-relaxed">{n.text}</p>
+                            {n.kind === "conflict" && n.evidence && (
+                              <p className="text-gray-500 text-[10px] mt-0.5 leading-relaxed">{n.evidence}</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Section>
+                )}
 
                 <Section title="Your points">
                   <div className="space-y-3">

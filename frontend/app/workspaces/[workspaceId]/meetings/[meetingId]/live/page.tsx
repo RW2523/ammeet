@@ -81,6 +81,9 @@ export default function LiveMeetingRoomPage() {
     if (!botInfo) return;
     const s = (botInfo as { live_status?: string; status?: string }).live_status
       ?? (botInfo as { status?: string }).status;
+    // Local state is also fed by WebSocket events, so it can't be derived purely
+    // from the query — this one-shot sync per fetch is intentional.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (s) setBotStatus(s);
     if ((botInfo as { session_active?: boolean }).session_active) setSessionActive(true);
   }, [botInfo]);
