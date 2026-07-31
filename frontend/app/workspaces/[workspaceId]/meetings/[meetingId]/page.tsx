@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, type Dispatch, type SetStateAction } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { isAxiosError } from "axios";
-import { delegateApi, meetingApi, questionApi, reportApi } from "@/lib/api-client";
+import { approvalsApi, delegateApi, meetingApi, questionApi, reportApi } from "@/lib/api-client";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -15,10 +15,10 @@ import { Progress } from "@/components/ui/progress";
 import {
   ArrowLeft, Upload, Zap, FileText, CheckCircle, AlertTriangle,
   Clock, User, Target, RefreshCw, Send, Shield, Bot, Eye,
-  History, HelpCircle
+  History, HelpCircle, ChevronDown, ChevronRight, XCircle
 } from "lucide-react";
 import Link from "next/link";
-import type { DelegateSession, DelegateStage, Meeting, PrepBrief, Question, ProxyEvent, Report } from "@/lib/types";
+import type { ApprovalDecision, ApprovalRequest, DelegateSession, DelegateStage, Meeting, PrepBrief, Question, ProxyEvent, Report } from "@/lib/types";
 import { BASE_URL } from "@/lib/api";
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -58,6 +58,9 @@ export default function MeetingPage() {
   const [proxyEvents, setProxyEvents] = useState<ProxyEvent[]>([]);
   const [proxyRunning, setProxyRunning] = useState(false);
   const [activeTab, setActiveTab] = useState("prep");
+  // R3 "Interactive": decided/timed-out approvals kept client-side. Lives here (not in
+  // ProxyRoom) because the tab content unmounts when the user switches tabs.
+  const [recentApprovals, setRecentApprovals] = useState<ApprovalRequest[]>([]);
 
   const { data: meeting } = useQuery({
     queryKey: ["meeting", workspaceId, meetingId],
@@ -515,6 +518,8 @@ export default function MeetingPage() {
                 proxyEvents={proxyEvents}
                 proxyRunning={proxyRunning}
                 onStart={startProxy}
+                recentApprovals={recentApprovals}
+                onRecentApprovals={setRecentApprovals}
               />
             </TabsContent>
           )}
@@ -601,21 +606,132 @@ function QuestionCard({
 
 // ── Proxy Room ─────────────────────────────────────────────────────────────────
 
+// Shared by ProxyRoom (approvals polling gate) and DelegateCard (status display);
+// TanStack Query dedupes on the key so only one request is in flight.
+function useDelegateSession(workspaceId: string, meetingId: string) {
+  return useQuery({
+    queryKey: ["delegate-session", workspaceId, meetingId],
+    queryFn: async (): Promise<DelegateSession | null> => {
+      try {
+        return await delegateApi.status(workspaceId, meetingId);
+      } catch (err) {
+        // 404 = no delegate session has ever been started for this meeting.
+        if (isAxiosError(err) && err.response?.status === 404) return null;
+        throw err;
+      }
+    },
+    retry: false,
+    // Poll every 5s while a session is underway; stop once it's done or errored.
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s && s !== "done" && s !== "error" ? 5000 : false;
+    },
+  });
+}
+
 function ProxyRoom({
   meeting,
   questions,
   proxyEvents,
   proxyRunning,
   onStart,
+  recentApprovals,
+  onRecentApprovals,
 }: {
   meeting: NonNullable<ReturnType<typeof useQuery<import("@/lib/types").Meeting>>["data"]>;
   questions: Question[];
   proxyEvents: ProxyEvent[];
   proxyRunning: boolean;
   onStart: () => void;
+  recentApprovals: ApprovalRequest[];
+  onRecentApprovals: Dispatch<SetStateAction<ApprovalRequest[]>>;
 }) {
+  const workspaceId = meeting.workspace_id;
+  const meetingId = meeting.id;
+  const qc = useQueryClient();
   const approvedCount = questions.filter((q) => q.proxy_allowed && !q.do_not_ask).length;
   const humanOnlyCount = questions.filter((q) => q.human_only).length;
+
+  // R3 "Interactive": poll pending approvals every 2s, but only while the
+  // delegate is joining/active — otherwise don't fetch at all.
+  const { data: delegateSession } = useDelegateSession(workspaceId, meetingId);
+  const delegateLive = delegateSession?.status === "joining" || delegateSession?.status === "active";
+
+  const { data: approvalRows } = useQuery({
+    queryKey: ["approvals", workspaceId],
+    queryFn: () => approvalsApi.listPending(workspaceId),
+    enabled: delegateLive,
+    refetchInterval: delegateLive ? 2000 : false,
+    retry: false,
+  });
+
+  // The endpoint is expected to return only pending rows, but render defensively:
+  // absorb any decided/timeout rows it happens to include into the recent list.
+  useEffect(() => {
+    const decided = (approvalRows ?? []).filter((r) => r.status !== "pending");
+    if (decided.length === 0) return;
+    onRecentApprovals((prev) => {
+      let changed = false;
+      const next = [...prev];
+      for (const row of decided) {
+        const i = next.findIndex((r) => r.id === row.id);
+        if (i === -1) {
+          next.push(row);
+          changed = true;
+        } else if (next[i].status !== row.status || next[i].decided_at !== row.decided_at) {
+          next[i] = row;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [approvalRows, onRecentApprovals]);
+
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+
+  const decideMutation = useMutation({
+    mutationFn: ({ approval, decision }: { approval: ApprovalRequest; decision: ApprovalDecision }) =>
+      approvalsApi.decide(workspaceId, approval.id, decision),
+    // Speed matters (the delegate defaults to silence after ~30s), so remove the
+    // card optimistically and reconcile with the server response afterwards.
+    onMutate: async ({ approval, decision }) => {
+      setDecidingId(approval.id);
+      await qc.cancelQueries({ queryKey: ["approvals", workspaceId] });
+      const prev = qc.getQueryData<ApprovalRequest[]>(["approvals", workspaceId]);
+      qc.setQueryData<ApprovalRequest[]>(["approvals", workspaceId], (rows) =>
+        (rows ?? []).filter((r) => r.id !== approval.id)
+      );
+      onRecentApprovals((recent) => [
+        { ...approval, status: decision, decided_at: new Date().toISOString() },
+        ...recent.filter((r) => r.id !== approval.id),
+      ]);
+      return { prev };
+    },
+    onSuccess: (row) => {
+      // Server row is authoritative for status/decided_at.
+      onRecentApprovals((recent) => [row, ...recent.filter((r) => r.id !== row.id)]);
+    },
+    onError: (err, { approval }, ctx) => {
+      if (isAxiosError(err) && err.response?.status === 409) {
+        // Already decided (or timed out) server-side: keep it out of the pending
+        // list, but drop our optimistic guess at the outcome — we don't know it.
+        toast.error("Already decided or expired.");
+        onRecentApprovals((recent) => recent.filter((r) => r.id !== approval.id));
+      } else {
+        toast.error("Couldn't record your decision — the card is back, try again.");
+        if (ctx?.prev) qc.setQueryData(["approvals", workspaceId], ctx.prev);
+        onRecentApprovals((recent) => recent.filter((r) => r.id !== approval.id));
+      }
+    },
+    onSettled: () => setDecidingId(null),
+  });
+
+  // Hide pending rows we've already optimistically decided, in case a poll
+  // that was in flight during the mutation re-delivers them.
+  const recentIds = new Set(recentApprovals.map((r) => r.id));
+  const pendingApprovals = (approvalRows ?? []).filter(
+    (r) => r.status === "pending" && !recentIds.has(r.id)
+  );
 
   const evtTypeIcon: Record<string, string> = {
     disclosure: "🔔",
@@ -631,6 +747,14 @@ function ProxyRoom({
 
   return (
     <div className="space-y-6">
+      {/* R3 "Interactive": live approval prompts — pinned above everything else */}
+      <PendingApprovalPrompts
+        pending={pendingApprovals}
+        currentMeetingId={meetingId}
+        decidingId={decidingId}
+        onDecide={(approval, decision) => decideMutation.mutate({ approval, decision })}
+      />
+
       {/* Consent banner */}
       <Card className="border-purple-800 bg-purple-900/20">
         <CardContent className="p-4 flex items-start gap-3">
@@ -706,6 +830,9 @@ function ProxyRoom({
       {/* R2 "Delegate": AI attends on your behalf */}
       <DelegateCard meeting={meeting} />
 
+      {/* R3 "Interactive": last few decided/timed-out approval requests */}
+      <RecentApprovals rows={recentApprovals} />
+
       {/* Event stream */}
       {(proxyEvents.length > 0 || proxyRunning) && (
         <Card className="bg-slate-950 border-slate-800">
@@ -776,11 +903,196 @@ function ProxyRoom({
   );
 }
 
+// ── Approval Prompts (R3 "Interactive") ────────────────────────────────────────
+
+// The delegate holds each proposed answer for ~30s after created_at, then
+// defaults to silence. The countdown is an approximation of that window.
+const APPROVAL_WINDOW_MS = 30_000;
+
+function approvalSecondsLeft(createdAt: string, now: number): number | null {
+  const created = Date.parse(createdAt);
+  if (Number.isNaN(created)) return null;
+  return Math.max(0, Math.ceil((created + APPROVAL_WINDOW_MS - now) / 1000));
+}
+
+function PendingApprovalPrompts({
+  pending,
+  currentMeetingId,
+  decidingId,
+  onDecide,
+}: {
+  pending: ApprovalRequest[];
+  currentMeetingId: string;
+  decidingId: string | null;
+  onDecide: (approval: ApprovalRequest, decision: ApprovalDecision) => void;
+}) {
+  // 1s tick for the countdowns; only runs while there is something pending.
+  const [now, setNow] = useState(() => Date.now());
+  const hasPending = pending.length > 0;
+  useEffect(() => {
+    if (!hasPending) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [hasPending]);
+
+  if (!hasPending) return null;
+
+  return (
+    <div className="space-y-3">
+      {pending.map((a) => {
+        const secondsLeft = approvalSecondsLeft(a.created_at, now);
+        const deciding = decidingId === a.id;
+        return (
+          <Card
+            key={a.id}
+            className="bg-amber-950/20 border-amber-900/60 border-l-4 border-l-amber-500"
+          >
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  {/* Visual urgency only — no sound. */}
+                  <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-50" />
+                    <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-400" />
+                  </span>
+                  <p className="text-amber-300 text-sm font-semibold">
+                    Delegate needs your approval to answer
+                  </p>
+                </div>
+                <span
+                  className={`text-xs font-mono flex-shrink-0 ${
+                    secondsLeft !== null && secondsLeft <= 10 ? "text-red-300" : "text-amber-300/80"
+                  }`}
+                >
+                  expires in ~{secondsLeft ?? 30}s
+                </span>
+              </div>
+
+              {a.meeting_id !== currentMeetingId && a.meeting_title && (
+                <p className="text-xs text-slate-500">From meeting: {a.meeting_title}</p>
+              )}
+
+              <div>
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                  Question asked
+                </p>
+                <p className="text-sm text-white">{a.question_text}</p>
+              </div>
+
+              <div>
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                  Proposed answer
+                </p>
+                <div className="max-h-28 overflow-y-auto rounded-md border border-slate-800 bg-slate-950/60 p-2">
+                  <p className="text-xs text-slate-300 whitespace-pre-wrap">{a.proposed_answer}</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <Button
+                  size="lg"
+                  onClick={() => onDecide(a, "approved")}
+                  disabled={deciding}
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold"
+                >
+                  <CheckCircle className="h-5 w-5 mr-2" /> Approve
+                </Button>
+                <Button
+                  size="lg"
+                  onClick={() => onDecide(a, "declined")}
+                  disabled={deciding}
+                  className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold"
+                >
+                  <XCircle className="h-5 w-5 mr-2" /> Decline
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+const APPROVAL_STATUS_BADGE: Record<string, string> = {
+  approved: "bg-green-900/60 text-green-300",
+  declined: "bg-red-900/60 text-red-300",
+  timeout: "bg-slate-800 text-slate-400",
+};
+
+const APPROVAL_STATUS_LABEL: Record<string, string> = {
+  approved: "Approved",
+  declined: "Declined",
+  timeout: "Timed out",
+};
+
+function RecentApprovals({ rows }: { rows: ApprovalRequest[] }) {
+  const [open, setOpen] = useState(false);
+  if (rows.length === 0) return null;
+
+  const recent = [...rows]
+    .sort((a, b) => {
+      const ta = Date.parse(a.decided_at ?? a.created_at) || 0;
+      const tb = Date.parse(b.decided_at ?? b.created_at) || 0;
+      return tb - ta;
+    })
+    .slice(0, 5);
+
+  return (
+    <Card className="bg-slate-900 border-slate-800">
+      <CardContent className="p-4">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="w-full flex items-center justify-between text-left"
+        >
+          <span className="text-sm font-medium text-slate-300 flex items-center gap-2">
+            <History className="h-4 w-4 text-slate-500" /> Recent approvals
+            <Badge className="bg-slate-800 text-slate-400 text-xs">{rows.length}</Badge>
+          </span>
+          {open ? (
+            <ChevronDown className="h-4 w-4 text-slate-500" />
+          ) : (
+            <ChevronRight className="h-4 w-4 text-slate-500" />
+          )}
+        </button>
+        {open && (
+          <div className="mt-3 space-y-2">
+            {recent.map((r) => (
+              <div key={r.id} className="border border-slate-800 rounded-lg p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-sm text-slate-300 flex-1">{r.question_text}</p>
+                  <Badge
+                    className={`text-xs flex-shrink-0 ${
+                      APPROVAL_STATUS_BADGE[r.status] ?? "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {APPROVAL_STATUS_LABEL[r.status] ?? r.status}
+                  </Badge>
+                </div>
+                {r.proposed_answer && (
+                  <p className="text-xs text-slate-500 mt-1 line-clamp-2">{r.proposed_answer}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Delegate Card (R2) ─────────────────────────────────────────────────────────
 
-const DELEGATE_STAGE_OPTIONS: { value: DelegateStage; label: string; description: string }[] = [
+const DELEGATE_STAGE_OPTIONS: { value: DelegateStage; label: string; description: string; note?: string }[] = [
   { value: "silent", label: "Silent", description: "Joins, discloses, records, reports" },
   { value: "briefed", label: "Briefed", description: "Also delivers your approved updates and asks your prepared questions" },
+  {
+    value: "interactive",
+    label: "Interactive",
+    description: "Answers from approved knowledge — each answer needs your live approval",
+    note: "Requires server enablement after legal review",
+  },
 ];
 
 const DELEGATE_STATUS_TEXT: Record<string, string> = {
@@ -820,31 +1132,20 @@ function DelegateCard({ meeting }: { meeting: Meeting }) {
   const qc = useQueryClient();
   const [stage, setStage] = useState<DelegateStage>("silent");
 
-  const { data: session } = useQuery({
-    queryKey: ["delegate-session", workspaceId, meetingId],
-    queryFn: async (): Promise<DelegateSession | null> => {
-      try {
-        return await delegateApi.status(workspaceId, meetingId);
-      } catch (err) {
-        // 404 = no delegate session has ever been started for this meeting.
-        if (isAxiosError(err) && err.response?.status === 404) return null;
-        throw err;
-      }
-    },
-    retry: false,
-    // Poll every 5s while a session is underway; stop once it's done or errored.
-    refetchInterval: (query) => {
-      const s = query.state.data?.status;
-      return s && s !== "done" && s !== "error" ? 5000 : false;
-    },
-  });
+  const { data: session } = useDelegateSession(workspaceId, meetingId);
 
   const startMutation = useMutation({
     mutationFn: () => delegateApi.start(workspaceId, meetingId, stage),
     onSuccess: (s) => {
-      toast.success(stage === "briefed" ? "Delegate is joining with your briefing." : "Delegate is joining silently.");
+      toast.success(
+        stage === "briefed" ? "Delegate is joining with your briefing."
+        : stage === "interactive" ? "Delegate is joining in interactive mode — watch for approval prompts."
+        : "Delegate is joining silently."
+      );
       qc.setQueryData(["delegate-session", workspaceId, meetingId], s);
     },
+    // Surfaces the server's `detail` string when present — e.g. the 403
+    // "interactive delegate is disabled pending legal review".
     onError: (err) => toast.error(delegateErrorMessage(err, "Couldn't start the delegate.")),
   });
 
@@ -875,7 +1176,7 @@ function DelegateCard({ meeting }: { meeting: Meeting }) {
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Stage picker */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {DELEGATE_STAGE_OPTIONS.map((opt) => {
             const selected = stage === opt.value;
             return (
@@ -899,6 +1200,9 @@ function DelegateCard({ meeting }: { meeting: Meeting }) {
                   <span className="text-sm font-medium text-white">{opt.label}</span>
                 </span>
                 <span className="block text-xs text-slate-400 mt-1">{opt.description}</span>
+                {opt.note && (
+                  <span className="block text-[11px] text-amber-400/90 mt-1">{opt.note}</span>
+                )}
               </button>
             );
           })}

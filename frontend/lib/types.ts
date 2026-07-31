@@ -181,7 +181,9 @@ export interface OpenItems {
 }
 
 // R2 "Delegate": the AI attends the meeting on your behalf.
-export type DelegateStage = "silent" | "briefed";
+// R3 adds "interactive": answers from approved knowledge, each answer needs live user approval.
+// The server may 403 interactive with a detail string while the feature flag is off.
+export type DelegateStage = "silent" | "briefed" | "interactive";
 export type DelegateSessionStatus = "created" | "joining" | "active" | "leaving" | "done" | "error";
 
 // A question a participant asked that the delegate captured for you.
@@ -200,6 +202,22 @@ export interface DelegateSession {
   error_detail?: string | null;
   created_at?: string | null;
   ended_at?: string | null;
+}
+
+// R3 "Interactive": a proposed answer awaiting the user's live approval.
+// The delegate waits ~30s from created_at, then defaults to staying silent ("timeout").
+export type ApprovalDecision = "approved" | "declined";
+export type ApprovalStatus = "pending" | "approved" | "declined" | "timeout";
+
+export interface ApprovalRequest {
+  id: string;
+  meeting_id: string;
+  meeting_title: string;
+  question_text: string;
+  proposed_answer: string;
+  status: ApprovalStatus;
+  created_at: string;
+  decided_at: string | null;
 }
 
 export interface ProxyEvent {

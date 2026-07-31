@@ -1,5 +1,5 @@
 import { api } from "./api";
-import type { ActionItem, CalendarEvent, DelegateSession, DelegateStage, Meeting, OpenItems, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
+import type { ActionItem, ApprovalDecision, ApprovalRequest, CalendarEvent, DelegateSession, DelegateStage, Meeting, OpenItems, Person, PrepBrief, Question, Report, User, Workspace } from "./types";
 
 // Auth
 export const authApi = {
@@ -234,6 +234,20 @@ export const delegateApi = {
   status: (workspaceId: string, meetingId: string) =>
     api
       .get<DelegateSession>(`/workspaces/${workspaceId}/meetings/${meetingId}/delegate/status`)
+      .then((r) => r.data),
+};
+
+// R3 "Interactive": live answer approvals for the interactive delegate.
+// The delegate waits ~30s per proposed answer, then defaults to silence — decide fast.
+export const approvalsApi = {
+  listPending: (workspaceId: string) =>
+    api
+      .get<ApprovalRequest[]>(`/workspaces/${workspaceId}/approvals`, { params: { status: "pending" } })
+      .then((r) => r.data),
+  /** 409 = the request was already decided (or timed out) server-side. */
+  decide: (workspaceId: string, approvalId: string, decision: ApprovalDecision) =>
+    api
+      .post<ApprovalRequest>(`/workspaces/${workspaceId}/approvals/${approvalId}/decision`, { decision })
       .then((r) => r.data),
 };
 

@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     tts_provider: Literal["none", "openai"] = "openai"
     tts_voice: str = "nova"  # nova | alloy | echo | fable | onyx | shimmer
 
+    # Interactive delegate (Phase 3 stage C). OFF by default — enabling it in
+    # production is an explicit human/legal decision, never a code default.
+    delegate_interactive_enabled: bool = False
+    # How long the delegate waits for a human decision before defaulting to silence.
+    approval_timeout_seconds: int = 30
+    # Approval notifications — "log" (default) | "ntfy" (push via ntfy.sh-compatible server)
+    approval_notify_provider: Literal["log", "ntfy"] = "log"
+    ntfy_base_url: str = "https://ntfy.sh"
+    ntfy_topic: str = ""
+
     # Meeting bot — "mock" | "recall" | "browser" (self-hosted headless-browser bot)
     bot_provider: Literal["mock", "recall", "browser"] = "mock"
     recall_api_key: str = ""

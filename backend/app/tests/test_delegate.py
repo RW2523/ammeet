@@ -437,7 +437,7 @@ async def test_delegate_start_rejects_invalid_stage(client, auth_token, db_sessi
                                   proxy_consent_given=True, meeting_url="https://zoom.us/j/1")
     r = await client.post(
         f"/api/workspaces/{test_workspace.id}/meetings/{meeting.id}/delegate/start",
-        json={"stage": "interactive"},
+        json={"stage": "autonomous"},
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert r.status_code == 422
