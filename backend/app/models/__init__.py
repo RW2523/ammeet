@@ -20,6 +20,7 @@ from app.models.knowledge import KnowledgeChunk, Integration, RetentionPolicy
 from app.models.meeting_bot import MeetingBot, BotStatus as BotStatusEnum
 from app.models.llm import LLMConfig
 from app.models.speaking import SpeakingPoint, SpeakingResponse, PointPriority, PointStatus
+from app.models.delegate import DelegateSession, DelegateStage, DelegateSessionStatus
 
 __all__ = [
     "User", "Workspace", "WorkspaceMember", "WorkspaceRole", "AuditLog",
@@ -31,4 +32,5 @@ __all__ = [
     "MeetingBot", "BotStatusEnum",
     "LLMConfig",
     "SpeakingPoint", "SpeakingResponse", "PointPriority", "PointStatus",
+    "DelegateSession", "DelegateStage", "DelegateSessionStatus",
 ]
