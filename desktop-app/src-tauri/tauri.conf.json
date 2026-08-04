@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AmMeeting",
+  "version": "0.1.0",
+  "identifier": "com.ammeet.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev --prefix ../ui",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build --prefix ../ui",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "settings",
+        "title": "AmMeeting",
+        "url": "index.html?window=settings",
+        "width": 480,
+        "height": 640,
+        "minWidth": 420,
+        "minHeight": 560,
+        "resizable": true,
+        "center": true,
+        "visible": true
+      },
+      {
+        "label": "overlay",
+        "title": "AmMeeting Overlay",
+        "url": "index.html?window=overlay",
+        "width": 340,
+        "height": 520,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https: http:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

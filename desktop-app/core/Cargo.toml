@@ -1,0 +1,37 @@
+[package]
+name = "ammeet-core"
+version = "0.1.0"
+edition = "2021"
+description = "AmMeeting desktop core: capture -> local STT -> backend Speak engine (one brain, many bodies)"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "ammeet_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ammeet-core-cli"
+path = "src/bin/ammeet-core-cli.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+hound = "3.5"
+cpal = "0.15"
+whisper-rs = "0.14"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[profile.dev]
+# whisper.cpp is unusably slow at opt-level 0; keep the C/C++ parts optimized.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

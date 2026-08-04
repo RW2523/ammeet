@@ -1,0 +1,13 @@
+# Build configuration quirks for this crate. See cmake/ggml-arm64-host.cmake:
+# ggml's -mcpu=native probing breaks GCC on arm64 hosts, so we hand the cmake
+# crate a toolchain file that pins an explicit, GCC-friendly -march instead.
+# `force = false` lets an environment-provided CMAKE_TOOLCHAIN_FILE win.
+#
+# NOTE: cargo only reads this file when the working directory is inside
+# desktop-app/core/. A sibling crate (e.g. src-tauri) building this crate by
+# path must either copy this [env] entry into its own .cargo/config.toml or
+# export CMAKE_TOOLCHAIN_FILE itself. x86_64 hosts are unaffected either way
+# (the file only touches GGML_* ARM cache variables).
+
+[env]
+CMAKE_TOOLCHAIN_FILE = { value = "cmake/ggml-arm64-host.cmake", relative = true, force = false }

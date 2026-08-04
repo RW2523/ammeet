@@ -1,0 +1,45 @@
+# AmMeeting desktop shell (Phase 2) — Tauri 2 tray app.
+#
+# NOTE: this crate CANNOT be compiled on the dev box that authored it (aarch64
+# Linux without webkit2gtk/gtk dev libraries). It is written against pinned,
+# documented Tauri 2 APIs and compiled on macOS (or a Linux box with the
+# packages listed in ../README.md). Versions are pinned exactly (`=`) to the
+# releases the code was reviewed against.
+
+[package]
+name = "ammeet-desktop"
+version = "0.1.0"
+description = "AmMeeting desktop app — tray, settings window, and Speak overlay"
+authors = ["AmMeeting"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+# `tray-icon`: tray support. `image-png`: decode the bundled PNG tray icon.
+# `macos-private-api`: required for the transparent overlay window on macOS
+# (paired with `app.macOSPrivateApi: true` in tauri.conf.json).
+tauri = { version = "=2.11.5", features = [
+  "tray-icon",
+  "image-png",
+  "macos-private-api",
+] }
+tauri-plugin-global-shortcut = "=2.3.2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
+
+# The capture/engine/API crate, built by a sibling task. This crate only ever
+# touches it through src/core_api.rs — if the core's real signatures drift from
+# the contract, core_api.rs (plus events.rs for EngineEvent) is the only place
+# that needs fixing.
+ammeet-core = { path = "../core" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

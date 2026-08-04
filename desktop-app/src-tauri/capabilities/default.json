@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "AmMeeting windows: core window/event/tray defaults, the window verbs the overlay needs (drag, resize, show/hide), and global-shortcut introspection. Nothing else — no fs, no shell, no http plugin (all network I/O happens in Rust via ammeet-core).",
+  "windows": ["settings", "overlay"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-is-visible",
+    "core:window:allow-set-focus",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "global-shortcut:allow-is-registered"
+  ]
+}
