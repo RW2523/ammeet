@@ -118,5 +118,5 @@ cmake -B build -DGGML_CUDA=1 && cmake --build build -j
 - **LAN-only by design.** Share links (`/r/…`) work only for people on your network.
   Exposing to the internet needs a reverse proxy + TLS + real domain — do that
   deliberately, later, not by default.
-- `EMAIL_PROVIDER=mock` + no email verification — fine for a personal/team box.
+- `EMAIL_PROVIDER=console` (emails are logged, not sent) + no email verification — fine for a personal/team box.
 - Meeting-bot (delegate) stays off (`BOT_PROVIDER=mock`) until Phase 3.
