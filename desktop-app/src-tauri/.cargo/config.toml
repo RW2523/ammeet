@@ -1,0 +1,7 @@
+# Replicates core/.cargo/config.toml — cargo env config is cwd-scoped, so
+# building this crate (which pulls ammeet-core by path) needs the same ggml
+# arm64 toolchain fix when built on an arm64 GCC host. See
+# ../../core/cmake/ggml-arm64-host.cmake for the why. Harmless elsewhere.
+
+[env]
+CMAKE_TOOLCHAIN_FILE = { value = "../core/cmake/ggml-arm64-host.cmake", relative = true, force = false }
